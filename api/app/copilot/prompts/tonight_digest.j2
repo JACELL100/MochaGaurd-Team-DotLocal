@@ -1,0 +1,12 @@
+FACTS (only source of truth; every number must appear here verbatim):
+- trader: {{ f.display_name }}, local time now {{ f.user_local_time }} ({{ f.user_tz }})
+- status: {{ f.status }}   (safe = no action needed; action_needed = positions must shrink before the close; auto_derisk = engine will close positions)
+- equity: {{ f.equity }}; gross exposure: {{ f.gross_exposure }}; leverage used: {{ f.leverage_used }}
+- margin required tonight: {{ f.margin_required }}; worst-case overnight loss at p99: {{ f.worst_case_loss }} ({{ f.worst_case_pct }} of equity)
+- positions flagged: {{ f.n_actions }}; symbols: {{ f.flagged_symbols }}
+- earnings tonight in this account: {{ f.earnings_symbols }}
+- frozen symbols in this account: {{ f.frozen_symbols }}
+- deadline: {{ f.deadline_et }} = {{ f.deadline_local }} local; auto-trim at {{ f.derisk_et }} = {{ f.derisk_local }} local
+
+Write the one-paragraph "Tonight" briefing this trader reads before bed. Calm, concrete, second person, max 70 words.
+Return JSON with keys "headline" (max 60 chars, e.g. "You are safe tonight." or "Action needed before {{ f.deadline_local }}.") and "summary" (the paragraph).

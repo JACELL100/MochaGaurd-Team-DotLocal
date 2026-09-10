@@ -1,0 +1,48 @@
+services:
+  - type: web
+    name: mochaguard-api
+    runtime: docker
+    rootDir: api
+    # Docker paths are resolved from the repository root, not rootDir.
+    dockerfilePath: api/Dockerfile
+    dockerContext: api
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # The schema is idempotent and is applied at each container start. This is
+      # useful on Render's free tier, where instances can be restarted often.
+      - key: RUN_MIGRATIONS_ON_START
+        value: "true"
+      # Free instances sleep while idle, so do not represent the in-process
+      # scheduler as a reliable always-on worker. Trigger evaluation via the API
+      # or use a paid worker before relying on unattended monitoring.
+      - key: SCHEDULER_ENABLED
+        value: "true"
+      - key: INTRADAY_BACKFILL_ON_START
+        value: "true"
+      - key: PYTHON_VERSION
+        value: "3.11.4"
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        sync: false
+      - key: ALPHA_VANTAGE_API_KEY
+        sync: false
+      - key: SEPOLIA_RPC_URL
+        sync: false
+      - key: ANCHOR_PRIVATE_KEY
+        sync: false
+      - key: CONTRACT_ADDRESS
+        sync: false
+      - key: INTERNAL_API_KEY
+        generateValue: true
+      - key: CORS_ORIGINS
+        sync: false

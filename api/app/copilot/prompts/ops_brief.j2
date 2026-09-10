@@ -1,0 +1,14 @@
+FACTS (only source of truth; every number must appear here verbatim):
+- as of: {{ f.as_of_et }} ET, phase {{ f.phase }}
+- accounts: {{ f.accounts }}; positions: {{ f.positions }}
+- gross exposure: {{ f.gross_exposure }}; net equity: {{ f.net_equity }}; average leverage used: {{ f.avg_leverage_used }}
+- worst-case loss if every position gaps to p99: {{ f.worst_case_loss }}
+- broker loss at p99 (client equity exhausted): {{ f.broker_loss_at_p99 }}
+- accounts at risk: {{ f.accounts_at_risk }} (reduce {{ f.reduce }}, margin call {{ f.margin_call }}, close {{ f.close }})
+- earnings tonight: {{ f.earnings_tonight }}
+- frozen symbols (guards): {{ f.frozen_symbols }}
+- top concentration: {{ f.top_concentration }}
+- engine evaluate time: {{ f.evaluate_ms }} ms
+
+Write the one-paragraph daily brief a risk desk reads at 3 PM. Factual, dense, max 80 words, no bullet points.
+Return JSON with a single key "body".
