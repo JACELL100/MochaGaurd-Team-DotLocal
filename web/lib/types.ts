@@ -57,6 +57,7 @@ export interface BookSummary {
 export interface BookResponse {
   summary: BookSummary;
   ops_brief: string | null;
+  ops_brief_model?: string;
   plain?: PlainBook;
   decisions: Decision[];
 }
@@ -105,6 +106,14 @@ export interface Explanation {
   action_hint: string | null;
   qty_to_reduce: number | null;
   max_leverage: number | null;
+  model: string;
+}
+
+export interface OpsBrief {
+  date: string;
+  as_of: string;
+  headline: string;
+  body: string;
   model: string;
 }
 

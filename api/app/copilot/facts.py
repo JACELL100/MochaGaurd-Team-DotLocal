@@ -49,16 +49,28 @@ def build_fact_pack(decision: dict, account: dict, position: dict | None, ts: da
     tz = account.get('tz') or 'UTC'
     deadline = cal.next_close(ts)
     derisk = deadline.replace(hour=15, minute=45)
+    position_notional = (position or {}).get('notional')
+    gross_exposure = account.get('gross_exposure')
+    concentration = (position_notional / gross_exposure
+                     if position_notional is not None and gross_exposure else None)
+    earnings_tonight = bool((position or {}).get('earnings_tonight'))
     facts = {
         'symbol': decision.get('symbol') or 'your account',
+        'is_account_level': decision.get('symbol') is None,
+        'position_subject': ("the account's positions" if decision.get('symbol') is None
+                             else f"your {decision['symbol']} position"),
         'action': decision['action'],
         'max_leverage': fmt_lev(decision.get('max_leverage')),
         'adverse_move': fmt_pct(decision.get('adverse_move') or (position or {}).get('adverse_move')),
-        'earnings_tonight': bool((position or {}).get('earnings_tonight')),
+        'gap_stat_used': 'earnings_gap_p99' if earnings_tonight else 'gap_p99',
+        'risk_percentile': '99th percentile',
+        'concentration': fmt_pct(concentration),
+        'earnings_tonight': earnings_tonight,
+        'earnings_window': 'before the next market open' if earnings_tonight else 'none',
         'frozen': bool((position or {}).get('frozen')) or decision['action'] == 'freeze',
         'qty_to_reduce': fmt_shares(decision.get('qty_to_reduce')),
         'position_qty': fmt_shares((position or {}).get('qty')),
-        'position_notional': fmt_money((position or {}).get('notional')),
+        'position_notional': fmt_money(position_notional),
         'equity': fmt_money(decision.get('equity') if decision.get('equity') is not None else account.get('equity')),
         'margin_required': fmt_money(decision.get('margin_required') if decision.get('margin_required') is not None
                                      else account.get('margin_required')),
@@ -90,12 +102,23 @@ def _tokens(text: str) -> set[str]:
     return out
 
 
+def _fact_values(value):
+    if isinstance(value, dict):
+        for nested in value.values():
+            yield from _fact_values(nested)
+    elif isinstance(value, (list, tuple, set)):
+        for nested in value:
+            yield from _fact_values(nested)
+    elif not isinstance(value, bool):
+        yield value
+
+
 def allowed_numbers(facts: dict) -> set[str]:
+    '''Every numeric token explicitly present in the fact pack, including nested values.'''
     allowed: set[str] = set()
-    for v in facts.values():
-        if isinstance(v, str):
-            allowed |= _tokens(v)
-    allowed |= {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '12', '15', '20', '24', '30', '45', '99', '100'}
+    for value in _fact_values(facts):
+        if isinstance(value, (str, int, float)):
+            allowed |= _tokens(str(value))
     return allowed
 
 

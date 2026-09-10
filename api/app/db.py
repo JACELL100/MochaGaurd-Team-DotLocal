@@ -447,20 +447,56 @@ async def insert_explanations(rows: list[dict]) -> None:
         return
     async with pool().acquire() as conn:
         await conn.executemany(
-            '''insert into decision_explanations (decision_id, account_id, ts, audience, headline, body, action_hint, model)
-               values ($1, $2, $3, $4, $5, $6, $7, $8)''',
-            [(r.get('decision_id'), _uuid(r.get('account_id')), r['ts'], r['audience'], r.get('headline'),
-              r.get('body'), r.get('action_hint'), r.get('model')) for r in rows])
+            '''insert into decision_explanations
+                   (decision_id, account_id, ts, brief_date, audience, headline, body, action_hint, model)
+               values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+               on conflict do nothing''',
+            [(r.get('decision_id'), _uuid(r.get('account_id')), r['ts'], r.get('brief_date'), r['audience'],
+              r.get('headline'), r.get('body'), r.get('action_hint'), r.get('model')) for r in rows])
 
 
-async def explanations_for_decisions(decision_ids: list[int]) -> dict[int, dict]:
+async def explanations_for_decisions(decision_ids: list[int], account_id: str | None = None) -> dict[int, dict]:
     if not decision_ids:
         return {}
     rows = await pool().fetch(
         '''select distinct on (decision_id) * from decision_explanations
-           where decision_id = any($1::bigint[]) and audience = 'user' order by decision_id, created_at desc''',
-        decision_ids)
+           where decision_id = any($1::bigint[]) and audience = 'user'
+             and ($2::uuid is null or account_id = $2)
+           order by decision_id, created_at desc''',
+        decision_ids, _uuid(account_id))
     return {r['decision_id']: dict(r) for r in rows}
+
+
+async def latest_relevant_decisions(account_id: str, symbols: list[str], limit: int = 200) -> list[dict]:
+    rows = await pool().fetch(
+        '''select * from risk_decisions
+           where run_id = '' and (account_id = $1 or (account_id is null and symbol = any($2::text[])))
+           order by id desc limit $3''',
+        _uuid(account_id), symbols, limit)
+    return [dict(row) for row in rows]
+
+
+async def daily_digest(account_id: str, brief_date: date) -> dict | None:
+    row = await pool().fetchrow(
+        '''select * from decision_explanations
+           where audience = 'digest' and account_id = $1 and brief_date = $2
+           order by created_at desc limit 1''',
+        _uuid(account_id), brief_date)
+    return dict(row) if row else None
+
+
+async def daily_digest_account_ids(brief_date: date) -> set[str]:
+    rows = await pool().fetch(
+        '''select account_id from decision_explanations
+           where audience = 'digest' and brief_date = $1 and account_id is not null''', brief_date)
+    return {str(row['account_id']) for row in rows}
+
+
+async def daily_ops_brief(brief_date: date) -> dict | None:
+    row = await pool().fetchrow(
+        '''select * from decision_explanations
+           where audience = 'ops' and brief_date = $1 order by created_at desc limit 1''', brief_date)
+    return dict(row) if row else None
 
 
 async def latest_ops_brief(since: datetime) -> dict | None:

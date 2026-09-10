@@ -27,14 +27,21 @@ class GroqClient:
     def __init__(self, api_key: str | None = None, model: str | None = None):
         self.key = api_key or settings.groq_api_key
         self.model = model or settings.groq_model
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(settings.llm_timeout_s + 1.0))
+        self._client: httpx.AsyncClient | None = None
 
     @property
     def configured(self) -> bool:
         return bool(self.key)
 
+    def _http(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=httpx.Timeout(settings.llm_timeout_s + 1.0))
+        return self._client
+
     async def aclose(self) -> None:
-        await self._client.aclose()
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     async def complete_json(self, prompt: str, *, max_tokens: int = 220, timeout: float | None = None) -> dict:
         if not self.key:
@@ -43,17 +50,22 @@ class GroqClient:
             'model': self.model,
             'messages': [{'role': 'system', 'content': SYSTEM}, {'role': 'user', 'content': prompt}],
             'temperature': 0.2,
-            'max_tokens': max_tokens,
+            'max_completion_tokens': max_tokens,
             'response_format': {'type': 'json_object'},
         }
         try:
-            r = await self._client.post(URL, json=body, headers={'Authorization': f'Bearer {self.key}'},
-                                        timeout=timeout or settings.llm_timeout_s)
-            r.raise_for_status()
-            content = r.json()['choices'][0]['message']['content']
-            return json.loads(content)
-        except (httpx.HTTPError, KeyError, ValueError, json.JSONDecodeError) as e:
-            raise LLMUnavailable(f'{type(e).__name__}: {e}') from e
+            response = await self._http().post(
+                URL, json=body, headers={'Authorization': f'Bearer {self.key}'},
+                timeout=timeout or settings.llm_timeout_s,
+            )
+            response.raise_for_status()
+            content = response.json()['choices'][0]['message']['content']
+            parsed = json.loads(content)
+            if not isinstance(parsed, dict):
+                raise TypeError('Groq response is not a JSON object')
+            return parsed
+        except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise LLMUnavailable(f'{type(exc).__name__}: {exc}') from exc
 
 
 llm = GroqClient()

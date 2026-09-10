@@ -3,10 +3,12 @@ FACTS (the only source of truth; every number you write must appear here verbati
 - engine action: {{ f.action }}   (reduce = trim before the close; margin_call = large trim required; close = position will be closed; freeze = no changes tonight)
 - allowed overnight leverage on this position: {{ f.max_leverage }}
 - 99th-percentile adverse move used for sizing: {{ f.adverse_move }}
-- earnings tonight: {{ 'yes' if f.earnings_tonight else 'no' }}
+- earnings risk window before the next market open: {{ 'yes' if f.earnings_tonight else 'no' }}
 - symbol frozen by guards (split / halt / bad price): {{ 'yes' if f.frozen else 'no' }}
 - shares the engine says to sell: {{ f.qty_to_reduce }} (of {{ f.position_qty }} held, notional {{ f.position_notional }})
 - account equity: {{ f.equity }}; margin required: {{ f.margin_required }}; leverage used: {{ f.leverage_used }}
+- risk statistic used: {{ f.gap_stat_used }} at the {{ f.risk_percentile }}
+- position concentration in this account: {{ f.concentration }}
 - worst-case overnight loss at p99: {{ f.worst_case_loss }}
 - user's local time now: {{ f.user_local_time }} ({{ f.user_tz }})
 - deadline to act yourself: {{ f.deadline_et }} = {{ f.deadline_local }} local
@@ -16,5 +18,5 @@ FACTS (the only source of truth; every number you write must appear here verbati
 Write the user-facing explanation for a trader who is about to go to sleep. Tone: calm, direct, respectful; no jargon; second person.
 Return JSON with exactly these keys:
 - "headline": one sentence, max 90 characters, states the decision (e.g. "Your {{ f.symbol }} position is capped at {{ f.max_leverage }} tonight.")
-- "body": 2 or 3 sentences explaining WHY using the adverse move, earnings/frozen status and leverage; mention the user's local time context.
+- "body": 2 or 3 sentences explaining WHY using the adverse move, earnings/frozen status and leverage; mention the user's local time context. If earnings risk is yes, say only that the report is due before the next market open; do not claim it is after today's close.
 - "action_hint": one sentence telling them exactly what to do and by when in BOTH ET and local time, or what will happen automatically. Empty string if action is freeze.

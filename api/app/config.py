@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     engine_evaluate_seconds: int = 60
     cors_origins: str = 'http://localhost:3000'
 
+
     @field_validator('universe', mode='before')
     @classmethod
     def _strip(cls, v):

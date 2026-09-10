@@ -9,6 +9,7 @@ import type {
   ApiResult,
   BookResponse,
   LeverageResult,
+  OpsBrief,
   ReplayResult,
   SessionReplay,
   TonightBriefing,
@@ -58,6 +59,10 @@ export function getBook(): Promise<ApiResult<BookResponse>> {
 
 export function getAccounts(): Promise<ApiResult<AccountSummary[]>> {
   return withAvailability(() => call<AccountSummary[]>("/dashboard/accounts"));
+}
+
+export function getDailyOpsBrief(): Promise<ApiResult<OpsBrief>> {
+  return withAvailability(() => call<OpsBrief>("/ops/daily-brief"));
 }
 
 export function getTonight(accountId: string): Promise<ApiResult<TonightBriefing | null>> {

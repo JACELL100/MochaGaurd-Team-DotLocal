@@ -10,8 +10,8 @@ import json
 import logging
 import uuid
 from contextlib import asynccontextmanager, suppress
-from datetime import date, datetime, timedelta, timezone
-from typing import Annotated, Any
+from datetime import date, datetime, timezone
+from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -109,8 +109,10 @@ class LiveService:
         self.yf: YFinance | None = None
         self.poller: QuotePoller | None = None
         self.tasks: list[asyncio.Task] = []
+        self._background_tasks: set[asyncio.Task] = set()
         self._reload_lock = asyncio.Lock()
         self._evaluate_lock = asyncio.Lock()
+        self._persist_lock = asyncio.Lock()
         self._last_fingerprints: dict[str, str] = {}
         self._decision_ids: dict[tuple[str, str], int] = {}
 
@@ -135,7 +137,8 @@ class LiveService:
     async def _backfill_intraday(self) -> None:
         if not self.yf and not (self.av and settings.alpha_vantage_premium):
             return
-        for symbol in self.book.symbols:
+        book = self.require_book()
+        for symbol in book.symbols:
             try:
                 await self._backfill_symbol_intraday(symbol)
             except (AVError, QuotaExceeded, YFinanceError) as exc:
@@ -167,10 +170,24 @@ class LiveService:
         for task in self.tasks:
             with suppress(asyncio.CancelledError):
                 await task
+        if self._background_tasks:
+            _, pending = await asyncio.wait(
+                set(self._background_tasks), timeout=settings.llm_timeout_s + 2.0,
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
         if self.av:
             await self.av.aclose()
         await self.auth.aclose()
+        await copilot.close()
         await db.close()
+
+    def _start_background(self, coro, *, name: str) -> None:
+        task = asyncio.create_task(coro, name=name)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     def require_book(self):
         if self.book is None or not self.book.symbols:
@@ -188,7 +205,7 @@ class LiveService:
             try:
                 if self.book and self.book.symbols:
                     await self.evaluate(datetime.now(tz=timezone.utc), record=True)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception('scheduled risk evaluation failed')
             await asyncio.sleep(max(15, settings.engine_evaluate_seconds))
 
@@ -202,30 +219,31 @@ class LiveService:
                 decision.id = self._decision_ids.get((self._decision_key(row), self._fingerprint(row)))
             self.latest = result
         if record:
-            asyncio.create_task(self._persist_evaluation(book, result), name='decision-log')
+            self._start_background(self._persist_evaluation(book, result), name='decision-log')
         return result
 
     async def _persist_evaluation(self, book, result) -> None:
-        try:
-            decision_rows = [decision.to_dict() for decision in result.decisions]
-            current = {self._decision_key(row): self._fingerprint(row) for row in decision_rows}
-            changed = [row for row in decision_rows
-                       if self._last_fingerprints.get(self._decision_key(row)) != self._fingerprint(row)]
-            ids = await db.log_decisions(changed)
-            self._last_fingerprints = current
-            for row, decision_id in zip(changed, ids):
-                row['id'] = decision_id
-                self._decision_ids[(self._decision_key(row), self._fingerprint(row))] = decision_id
-            for decision in result.decisions:
-                row = decision.to_dict()
-                decision.id = self._decision_ids.get((self._decision_key(row), self._fingerprint(row)))
-            await db.insert_snapshot(result.ts, result.phase, result.summary)
-            if changed:
-                await copilot.explain_decisions(book, result, changed)
-                await copilot.ops_brief(result)
-        except Exception:  # noqa: BLE001
-            # An audit/narration failure must never affect the completed decision.
-            log.exception('failed to persist downstream decision artifacts')
+        async with self._persist_lock:
+            try:
+                decision_rows = [decision.to_dict() for decision in result.decisions]
+                current = {self._decision_key(row): self._fingerprint(row) for row in decision_rows}
+                changed = [row for row in decision_rows
+                           if self._last_fingerprints.get(self._decision_key(row)) != self._fingerprint(row)]
+                ids = await db.log_decisions(changed)
+                self._last_fingerprints = current
+                for row, decision_id in zip(changed, ids):
+                    row['id'] = decision_id
+                    self._decision_ids[(self._decision_key(row), self._fingerprint(row))] = decision_id
+                for decision in result.decisions:
+                    row = decision.to_dict()
+                    decision.id = self._decision_ids.get((self._decision_key(row), self._fingerprint(row)))
+                await db.insert_snapshot(result.ts, result.phase, result.summary)
+                if changed:
+                    await copilot.explain_decisions(book, result, changed)
+                await copilot.ensure_daily_briefs(book, result)
+            except Exception:
+                # An audit/narration failure must never affect the completed decision.
+                log.exception('failed to persist downstream decision artifacts')
 
     @staticmethod
     def _decision_key(row: dict) -> str:
@@ -355,7 +373,8 @@ def account_status(result, account_id: str) -> str:
 async def health(request: Request):
     service = service_of(request)
     return {'ok': True, 'database': settings.db_configured, 'market_loaded': bool(service.book and service.book.symbols),
-            'alpha_vantage': bool(service.av), 'yfinance': bool(service.yf), 'chain_configured': settings.chain_configured}
+            'alpha_vantage': bool(service.av), 'yfinance': bool(service.yf), 'groq': bool(settings.groq_api_key),
+            'chain_configured': settings.chain_configured}
 
 
 @app.get('/me')
@@ -368,12 +387,15 @@ async def me(request: Request, principal: Annotated[Principal, Depends(get_princ
 async def dashboard_book(request: Request, _: Annotated[Principal, Depends(get_principal)]):
     service = service_of(request)
     result = await service.current_result()
-    brief = await db.latest_ops_brief(datetime.now(tz=timezone.utc) - timedelta(days=1))
+    brief = await copilot.ops_brief_for_request(service.require_book(), result)
+    if brief is None:
+        brief = copilot.deterministic_ops_brief(service.require_book(), result)
     # Every decision carries its own plain-language reason, so no screen ever shows a bare
     # machine string like "equity=79432 margin_req=95000" to a person.
     decisions = [{**decision_json(d), 'plain': explain.explain_decision(decision_json(d))}
                  for d in result.decisions]
-    return {'summary': result.summary, 'ops_brief': brief['body'] if brief else None,
+    return {'summary': result.summary, 'ops_brief': brief['body'],
+            'ops_brief_model': brief.get('model', 'template'),
             'plain': explain.explain_book(result.summary), 'decisions': decisions}
 
 
@@ -382,12 +404,13 @@ async def dashboard_accounts(request: Request, principal: Annotated[Principal, D
     service = service_of(request)
     accounts = await db.list_accounts()
     result = await service.current_result()
+    book = service.require_book()
     out = []
     for account in accounts:
         account_id = str(account['id'])
-        if account_id not in service.require_book().acct_idx:
+        if account_id not in book.acct_idx:
             continue
-        view = service.book.account_view(account_id, result)
+        view = book.account_view(account_id, result)
         out.append({'id': account_id, 'display_name': view['display_name'], 'tz': view['tz'], 'equity': view['equity'],
                     'status': account_status(result, account_id)})
     return out
@@ -396,28 +419,71 @@ async def dashboard_accounts(request: Request, principal: Annotated[Principal, D
 @app.get('/tonight/{account_id}')
 async def tonight(account_id: str, request: Request, principal: Annotated[Principal, Depends(get_principal)]):
     service = service_of(request)
-    account = await accessible_account(account_id)
+    await accessible_account(account_id)
     result = await service.current_result()
-    if account_id not in service.require_book().acct_idx:
+    book = service.require_book()
+    if account_id not in book.acct_idx:
         raise HTTPException(status_code=404, detail='Account has no live portfolio in the risk book')
-    view = service.book.account_view(account_id, result)
-    decisions = [decision_json(d) for d in result.decisions if d.account_id == account_id or
-                 (d.action == 'freeze' and any(p['symbol'] == d.symbol for p in view['positions']))]
+    view = book.account_view(account_id, result)
+    decisions = copilot.decisions_for_account(book, result, account_id, view)
     for decision in decisions:
         decision['plain'] = explain.explain_decision(decision, tz=view.get('tz'))
-    saved = await db.recent_decisions(datetime.now(tz=timezone.utc) - timedelta(days=1), account_id)
-    explanations = await db.explanations_for_decisions([int(d['id']) for d in saved])
+
+    symbols = [position['symbol'] for position in view['positions']]
+    saved = await db.latest_relevant_decisions(account_id, symbols)
+    explanations = await db.explanations_for_decisions([int(row['id']) for row in saved], account_id)
     cards = []
     for decision in decisions:
-        matching = next((old for old in saved if old.get('symbol') == decision.get('symbol') and old['action'] == decision['action']), None)
+        matching = next((row for row in saved
+                         if row.get('symbol') == decision.get('symbol')
+                         and row['action'] == decision['action']
+                         and service._fingerprint(row) == service._fingerprint(decision)), None)
         explanation = explanations.get(int(matching['id'])) if matching else None
+        if matching and decision.get('id') is None:
+            decision['id'] = matching['id']
+        card = copilot.deterministic_decision_card(decision, view, result.ts)
         if explanation:
-            cards.append({'decision_id': explanation['decision_id'], 'symbol': decision.get('symbol'), 'action': decision['action'],
-                          'headline': explanation['headline'], 'body': explanation['body'], 'action_hint': explanation['action_hint'],
-                          'qty_to_reduce': decision.get('qty_to_reduce'), 'max_leverage': decision.get('max_leverage'),
-                          'model': explanation['model']})
+            card.update({
+                'decision_id': explanation['decision_id'],
+                'headline': explanation['headline'],
+                'body': explanation['body'],
+                'action_hint': explanation['action_hint'],
+                'model': explanation['model'],
+            })
+        cards.append(card)
+
     digest = copilot.deterministic_tonight_digest(view, decisions, result)
+    brief_date = cal.to_et(result.ts).date()
+    saved_digest = await db.daily_digest(account_id, brief_date)
+    if saved_digest is None and copilot.digest_due(result.ts):
+        saved_digest = await copilot.ensure_account_digest(view, decisions, result)
+    if saved_digest:
+        digest.update({
+            'headline': saved_digest['headline'],
+            'summary': saved_digest['body'],
+            'model': saved_digest['model'],
+        })
     return {'account': view, 'as_of': result.ts.isoformat(), 'decisions': decisions, 'cards': cards, **digest}
+
+
+@app.get('/ops/daily-brief')
+async def daily_ops_brief(request: Request, _: Annotated[Principal, Depends(get_principal)]):
+    service = service_of(request)
+    result = await service.current_result()
+    brief = await copilot.ops_brief_for_request(service.require_book(), result)
+    if brief is None:
+        brief = {
+            **copilot.deterministic_ops_brief(service.require_book(), result),
+            'ts': result.ts,
+            'brief_date': cal.to_et(result.ts).date(),
+        }
+    return {
+        'date': str(brief.get('brief_date') or cal.to_et(result.ts).date()),
+        'as_of': (brief.get('ts') or result.ts).isoformat(),
+        'headline': brief.get('headline') or 'Daily risk brief',
+        'body': brief['body'],
+        'model': brief.get('model') or 'template',
+    }
 
 
 @app.post('/leverage')
@@ -426,12 +492,13 @@ async def leverage(input: LeverageInput, request: Request, _: Annotated[Principa
     ts = input.ts or datetime.now(tz=timezone.utc)
     if ts.tzinfo is None:
         raise HTTPException(status_code=422, detail='ts must include a timezone offset')
+    book = service.require_book()
     try:
-        result = service.require_book().symbol_leverage(input.symbol, ts, input.notional)
+        result = book.symbol_leverage(input.symbol, ts, input.notional)
     except KeyError:
         raise HTTPException(status_code=404, detail=f'{input.symbol} is not in the live risk universe') from None
-    risk = service.book.symbol_risk(input.symbol)
-    sector_mult, sector_note, peers = service.book.sector_signal(input.symbol, ts)
+    risk = book.symbol_risk(input.symbol)
+    sector_mult, sector_note, peers = book.sector_signal(input.symbol, ts)
     # The explanation is computed, not generated: no model call, no network, always present.
     return {**result.__dict__, 'ramp': cal.ramp_fraction(ts),
             'sector': {'sector': sectors.sector_of(input.symbol), 'multiplier': round(sector_mult, 4),
@@ -562,7 +629,7 @@ async def replay_session(input: SessionReplayInput, request: Request,
                 decision['id'] = decision_id
             await db.insert_liquidations(result.fills, run_id=run_id)
             await db.save_replay(run_id, session_date, summary, result.events, result.series)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception('replay persistence failed for %s', run_id)
 
     # Fills are persisted in full; the response carries a bounded sample so a 2,000-account

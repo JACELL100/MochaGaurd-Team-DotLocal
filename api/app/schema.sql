@@ -170,15 +170,23 @@ create table if not exists decision_explanations (
   decision_id  bigint references risk_decisions,
   account_id   uuid,
   ts           timestamptz not null,
-  audience     text not null,                    -- 'user' | 'ops'
+  brief_date   date,                             -- ET date for once-daily digest / ops rows
+  audience     text not null,                    -- 'user' | 'digest' | 'ops'
   headline     text,
   body         text,
   action_hint  text,
   model        text,                             -- llm model id or 'template'
   created_at   timestamptz not null default now()
 );
+alter table decision_explanations add column if not exists brief_date date;
 create index if not exists decision_explanations_acct_idx on decision_explanations (account_id, ts desc);
 create index if not exists decision_explanations_decision_idx on decision_explanations (decision_id);
+create unique index if not exists decision_explanations_daily_digest_key
+  on decision_explanations (account_id, brief_date)
+  where audience = 'digest' and account_id is not null and brief_date is not null;
+create unique index if not exists decision_explanations_daily_ops_key
+  on decision_explanations (brief_date)
+  where audience = 'ops' and brief_date is not null;
 
 -- On-chain anchoring
 create table if not exists anchor_batches (

@@ -11,15 +11,14 @@ import {
   pct,
   shares,
   statusTone,
-  timeIn,
   tzCity,
 } from "@/lib/format";
-import type { Explanation } from "@/lib/types";
+import type { Explanation, TonightBriefing } from "@/lib/types";
 import { PlainReason } from "@/components/ui/PlainReason";
 import { AccountPicker } from "./AccountPicker";
 import { GlowingCard } from "@/components/ui/GlowingCard";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { Moon, ShieldCheck, Clock, Terminal } from "lucide-react";
+
 
 export const metadata = { title: "Tonight" };
 
@@ -70,13 +69,13 @@ export default async function TonightPage({ searchParams }: { searchParams: Prom
   );
 }
 
-function Briefing({ b }: { b: any }) {
+function Briefing({ b }: { b: TonightBriefing }) {
   const a = b.account;
   const tone = statusTone(b.status);
   const icon = b.status === "safe" ? "✅" : b.status === "auto_derisk" ? "🛑" : "⚠️";
-  const actionable = b.cards.filter((c: any) => c.action !== "freeze");
-  const frozen = b.cards.filter((c: any) => c.action === "freeze");
-  const plainDecisions = (b.decisions ?? []).filter((d: any) => d.plain);
+  const actionable = b.cards.filter((card) => card.action !== "freeze");
+  const frozen = b.cards.filter((card) => card.action === "freeze");
+  const plainDecisions = b.decisions.filter((decision) => decision.plain);
 
   return (
     <div className="space-y-6 relative z-20">
@@ -94,6 +93,9 @@ function Briefing({ b }: { b: any }) {
             <div className="tabular mt-1 text-lg font-semibold text-white">{b.local_time} local</div>
             <div className="mt-0.5 text-xs text-[#64748B]">
               {etTime(b.as_of)} in New York · deadline {b.deadline_local} ({b.deadline_et})
+            </div>
+            <div className="mt-1 text-[10px] font-mono text-[#64748B]">
+              {b.model === "template" ? "Deterministic briefing fallback" : `Groq briefing · ${b.model}`}
             </div>
           </div>
         }
@@ -121,7 +123,7 @@ function Briefing({ b }: { b: any }) {
         <section>
           <h2 className="mb-3 text-sm font-semibold tracking-wide text-white">What to do before {b.deadline_local}</h2>
           <div className="grid gap-4 md:grid-cols-2">
-            {actionable.map((c: any, i: number) => (
+            {actionable.map((c, i) => (
               <ExplanationCard key={c.decision_id ?? i} c={c} tz={a.tz} />
             ))}
           </div>
@@ -135,7 +137,7 @@ function Briefing({ b }: { b: any }) {
         <section>
           <h2 className="mb-3 text-sm font-semibold tracking-wide text-white">Why the engine acted</h2>
           <div className="grid gap-3 md:grid-cols-2">
-            {plainDecisions.map((d: any, i: number) => (
+            {plainDecisions.map((d, i) => (
               <PlainReason key={d.id ?? `p${i}`} plain={d.plain} raw={d.reason} />
             ))}
           </div>
@@ -144,7 +146,7 @@ function Briefing({ b }: { b: any }) {
 
       {frozen.length > 0 && (
         <section className="grid gap-4 md:grid-cols-2">
-          {frozen.map((c: any, i: number) => (
+          {frozen.map((c, i) => (
             <ExplanationCard key={c.decision_id ?? `f${i}`} c={c} tz={a.tz} />
           ))}
         </section>
@@ -175,7 +177,7 @@ function Briefing({ b }: { b: any }) {
               </tr>
             </thead>
             <tbody className="tabular divide-y divide-[#1C1836]/60">
-              {a.positions.map((p: any) => (
+              {a.positions.map((p) => (
                 <tr key={p.symbol} className="hover:bg-[#121024]/40 transition-colors">
                   <td className="py-2.5 pr-4 font-semibold text-white">{p.symbol}</td>
                   <td className="py-2.5 pr-4 text-right text-[#CBD5E1]">{shares(p.qty)}</td>
@@ -199,7 +201,7 @@ function Briefing({ b }: { b: any }) {
   );
 }
 
-function ExplanationCard({ c, tz }: { c: any; tz: string }) {
+function ExplanationCard({ c, tz }: { c: Explanation; tz: string }) {
   const tone = actionTone(c.action);
   return (
     <GlowingCard className="h-full flex flex-col justify-between">
@@ -221,7 +223,7 @@ function ExplanationCard({ c, tz }: { c: any; tz: string }) {
         )}
       </div>
       <p className="mt-4 pt-3 border-t border-[#1C1836] text-[10px] text-[#64748B] font-mono">
-        Local timezone {tz} · Grounded LLM: {c.model}
+        Local timezone {tz} · {c.model === "template" ? "Deterministic fact template" : `Grounded Groq narration: ${c.model}`}
       </p>
     </GlowingCard>
   );

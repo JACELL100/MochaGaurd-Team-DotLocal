@@ -4,11 +4,11 @@
 {{ f.symbol }} has a corporate action or price-quality issue today, so the engine refuses to liquidate or re-lever it until clean prices arrive. Your position is untouched.
 
 {%- elif f.action == 'close' -%}
-We are closing your {{ f.symbol }} position before the bell.
-Your equity ({{ f.equity }}) no longer covers the margin required ({{ f.margin_required }}). {% if f.earnings_tonight %}{{ f.symbol }} reports earnings tonight and its 99th-percentile move is {{ f.adverse_move }}.{% else %}{{ f.symbol }}'s 99th-percentile overnight move is {{ f.adverse_move }}.{% endif %} At {{ f.leverage_used }} leverage that move would take the account below zero.
+We are closing {{ f.position_subject }} before the bell.
+Your equity ({{ f.equity }}) no longer covers the margin required ({{ f.margin_required }}). {% if f.earnings_tonight %}{{ f.symbol }} reports before the next market open and the {{ f.risk_percentile }} move used is {{ f.adverse_move }}. {% elif f.adverse_move != '-' %}The {{ f.risk_percentile }} overnight move used is {{ f.adverse_move }}. {% endif %}The engine has already determined the account cannot safely carry this exposure overnight.
 The position will be unwound at {{ f.derisk_et }} ({{ f.derisk_local }} your time) with market-impact limits so you get the fairest fill available.
 {%- else -%}
 {% if f.action == 'margin_call' %}Margin call: {% endif %}{{ f.symbol }} is capped at {{ f.max_leverage }} tonight.
-{% if f.earnings_tonight %}{{ f.symbol }} reports earnings after the close. On earnings nights it has moved as much as {{ f.adverse_move }}, and at {{ f.leverage_used }} leverage that gap would wipe out your account.{% else %}{{ f.symbol }} carries an overnight gap risk of {{ f.adverse_move }} at the 99th percentile, more than your equity of {{ f.equity }} can absorb at {{ f.leverage_used }} leverage.{% endif %} Overnight leverage is sized so a 99th-percentile move cannot take you below zero.
+{% if f.earnings_tonight %}{{ f.symbol }} reports before the next market open. Its {{ f.risk_percentile }} earnings move is {{ f.adverse_move }}, and the engine has determined the current {{ f.leverage_used }} exposure is too large to carry safely.{% else %}{{ f.symbol }} carries an overnight gap risk of {{ f.adverse_move }} at the {{ f.risk_percentile }}, more than your equity of {{ f.equity }} can safely absorb at {{ f.leverage_used }} leverage.{% endif %} Overnight leverage is sized so the decided risk limit is respected.
 Sell {{ f.qty_to_reduce }} shares of {{ f.symbol }} before {{ f.deadline_et }} ({{ f.deadline_local }} your time) to stay in control, or we will reduce it for you at {{ f.derisk_et }} ({{ f.derisk_local }}).
 {%- endif -%}
