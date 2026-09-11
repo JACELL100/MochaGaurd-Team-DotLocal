@@ -5,6 +5,7 @@ import { Header } from "@/components/layout/Header";
 import { currentViewer } from "@/lib/supabase/server";
 import { Footer } from "@/components/layout/Footer";
 import { Web3Provider } from "@/components/Web3Provider";
+import { CopilotChat } from "@/components/CopilotChat";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -35,6 +36,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
           <Header viewer={viewer} />
           <main className="flex-1 w-full pt-16">{children}</main>
           <Footer />
+          <CopilotChat />
         </Web3Provider>
       </body>
     </html>

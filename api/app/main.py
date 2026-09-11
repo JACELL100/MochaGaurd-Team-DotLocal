@@ -13,7 +13,8 @@ from contextlib import asynccontextmanager, suppress
 from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -21,6 +22,7 @@ from . import db
 from .anchor import publisher
 from .auth import Principal, SupabaseAuth, get_principal
 from .config import settings
+from .copilot import chat as copilot_chat_module
 from .copilot import explain
 from .copilot import service as copilot
 from .data import halts as halt_detect
@@ -930,3 +932,73 @@ async def wallet_disconnect(
     account_id = str(account['id'])
     await db.delete_wallet_connection(account_id, input.wallet_address, input.chain_id)
     return {'ok': True, 'wallet_address': input.wallet_address, 'chain_id': input.chain_id}
+
+
+# ── Copilot chat ──────────────────────────────────────────────────────────────
+
+class ChatMessageInput(BaseModel):
+    role: str
+    content: Any  # str | list[dict] for multimodal (text + image_url)
+
+
+class ChatInput(BaseModel):
+    messages: list[ChatMessageInput]
+    account_id: str | None = None
+
+
+@app.post('/copilot/chat')
+async def copilot_chat_endpoint(
+    body: ChatInput,
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+):
+    """Streaming chat with the MochaGuard copilot.
+
+    Accepts a conversation history and an optional account_id so the copilot can answer
+    specific questions about live positions. Returns SSE tokens as they stream from Groq.
+    The risk engine's decisions are never modified here; this is narration only.
+    """
+    service = service_of(request)
+
+    # Inject live account context when available so the copilot can reference real numbers.
+    context_lines: list[str] = []
+    if body.account_id:
+        try:
+            result = await service.current_result()
+            view = service.book.account_view(str(body.account_id), result)
+            context_lines += [
+                f"Trader: {view.get('display_name') or 'Anonymous'}",
+                f"Equity: ${view.get('equity', 0):,.0f}",
+                f"Margin Required: ${view.get('margin_required', 0):,.0f}",
+                f"Gross Exposure: ${view.get('gross_exposure', 0):,.0f}",
+                f"Leverage Used: {view.get('leverage_used') or 0:.1f}x",
+                f"Worst-Case Loss (p99 gap): ${view.get('worst_case_loss', 0):,.0f}",
+            ]
+            positions = view.get('positions') or []
+            if positions:
+                context_lines.append(f"Open Positions ({len(positions)}):")
+                for p in positions:
+                    context_lines.append(
+                        f"  {p['symbol']}: qty={p['qty']:,.0f} @ ${p['price']:,.2f}"
+                        f" | notional=${p['notional']:,.0f}"
+                        f" | max_leverage={p['max_leverage']:.1f}x"
+                        f" | adverse_move={p['adverse_move'] * 100:.1f}%"
+                        + (' | EARNINGS TONIGHT' if p.get('earnings_tonight') else '')
+                        + (' | FROZEN' if p.get('frozen') else '')
+                    )
+        except Exception as exc:
+            log.debug('Could not inject account context for %s: %s', body.account_id, exc)
+
+    context = '\n'.join(context_lines) if context_lines else None
+    messages = [m.model_dump() for m in body.messages]
+
+    async def event_stream():
+        async for token in copilot_chat_module.stream_chat(messages, context=context):
+            yield f'data: {json.dumps({"token": token})}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    return StreamingResponse(
+        event_stream(),
+        media_type='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
