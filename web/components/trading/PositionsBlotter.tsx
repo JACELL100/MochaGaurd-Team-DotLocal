@@ -17,20 +17,20 @@ import { lev, money, pct, shares } from "@/lib/format";
 
 type SortKey = "symbol" | "notional" | "unrealised_pnl" | "max_leverage" | "worst_case_loss";
 
-function pnlTone(value: number | null): string {
-  if (value === null) return "text-[#64748B]";
+function pnlTone(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "text-[#64748B]";
   if (value > 0) return "text-emerald-400";
   if (value < 0) return "text-rose-400";
   return "text-[#94A3B8]";
 }
 
-function signedMoney(value: number | null): string {
-  if (value === null) return "–";
+function signedMoney(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "–";
   return `${value >= 0 ? "+" : "−"}${money(Math.abs(value))}`;
 }
 
-function signedPct(value: number | null): string {
-  if (value === null) return "–";
+function signedPct(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "–";
   return `${value >= 0 ? "+" : "−"}${(Math.abs(value) * 100).toFixed(2)}%`;
 }
 
@@ -62,7 +62,7 @@ export function PositionsBlotter({
   });
 
   const totalPnl = positions.reduce((sum, row) => sum + (row.unrealised_pnl ?? 0), 0);
-  const anyBasis = positions.some((row) => row.avg_price !== null);
+  const anyBasis = positions.some((row) => row.avg_price != null);
 
   function header(key: SortKey, label: string, align = "text-right") {
     const active = sort === key;
@@ -146,7 +146,7 @@ export function PositionsBlotter({
                   </td>
                   <td className="py-2.5 text-right text-[#CBD5E1]">{shares(row.qty)}</td>
                   <td className="py-2.5 text-right text-[#64748B]">
-                    {row.avg_price !== null ? money(row.avg_price, true) : "–"}
+                    {row.avg_price != null ? money(row.avg_price, true) : "–"}
                   </td>
                   <td className="py-2.5 text-right text-white">{money(row.price, true)}</td>
                   <td className={`py-2.5 text-right ${pnlTone(row.unrealised_pnl)}`}>
@@ -175,7 +175,7 @@ export function PositionsBlotter({
                   </td>
 
                   <td className="py-2.5 text-right text-[#CBD5E1]">
-                    {row.margin_required !== null ? money(row.margin_required) : "–"}
+                    {row.margin_required != null ? money(row.margin_required) : "–"}
                     {util !== null && (
                       <span className="ml-1 text-[10px] text-[#64748B]">
                         {(util * 100).toFixed(0)}%
@@ -187,7 +187,7 @@ export function PositionsBlotter({
                     className="py-2.5 text-right text-amber-300/90"
                     title="Loss if this leg gaps to its 99th-percentile adverse move"
                   >
-                    −{money(row.worst_case_loss)}
+                    −{money(row.worst_case_loss ?? 0)}
                     <span className="ml-1 text-[10px] text-[#64748B]">
                       {pct(row.adverse_move, 1)}
                     </span>

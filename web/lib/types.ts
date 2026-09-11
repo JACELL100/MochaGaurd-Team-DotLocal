@@ -66,16 +66,22 @@ export interface PositionRow {
   qty: number;
   price: number;
   notional: number;
-  /** Cost basis. Null when the broker did not supply one — P&L is then unavailable, not zero. */
-  avg_price: number | null;
-  unrealised_pnl: number | null;
-  unrealised_pct: number | null;
+  /**
+   * Cost basis. Null when the broker did not supply one — P&L is then unavailable, not zero.
+   *
+   * These enrichment fields are optional because callers that construct a position by hand
+   * (the stress-test simulator builds hypothetical books) legitimately have no cost basis or
+   * carry to report. Components render "–" for a missing value rather than a misleading zero.
+   */
+  avg_price?: number | null;
+  unrealised_pnl?: number | null;
+  unrealised_pct?: number | null;
   /** Move vs the last official daily close. */
-  day_change: number | null;
+  day_change?: number | null;
   /** Equity this leg alone ties up at its own allowed leverage. */
-  margin_required: number | null;
+  margin_required?: number | null;
   /** What this leg loses if it gaps to its 99th-percentile adverse move. */
-  worst_case_loss: number;
+  worst_case_loss?: number;
   max_leverage: number;
   adverse_move: number;
   earnings_tonight: boolean;
