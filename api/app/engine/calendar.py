@@ -127,6 +127,55 @@ def next_close(ts: datetime) -> datetime:
     return session_close(next_trading_day(d))
 
 
+def closure_hours(ts: datetime) -> float:
+    """Hours the US market stays shut from ``ts`` until the next open.
+
+    This is the number the overnight risk actually scales with, and it is not a constant:
+    a normal Tuesday night is ~17.5 hours, a Friday night is ~65, and a long holiday weekend
+    is ~89. An engine that hard-codes "overnight" silently under-prices every weekend, which
+    is two extra nights of news with no underlying tape to react to.
+    """
+    if phase_at(ts) in (Phase.OPEN, Phase.CLOSING_RAMP):
+        # Still tradeable now; the exposure that matters starts at today's close.
+        et = to_et(ts)
+        start = session_close(et.date())
+    else:
+        start = ts
+    return max(0.0, (next_open(start) - start).total_seconds() / 3600.0)
+
+
+# A standard overnight gap (Tue close -> Wed open). Longer closures are scaled against this.
+BASELINE_CLOSURE_HOURS = 17.5
+# Risk grows with the square root of time, not linearly: two nights of news is not twice one
+# night's move. Capped so a four-day weekend cannot run away with the limit.
+CLOSURE_MAX_WIDEN = 2.0
+
+
+def closure_multiplier(ts: datetime) -> float:
+    """How much wider the gap is than a normal overnight, from the closure length alone.
+
+    sqrt(time) scaling is the standard way volatility grows with horizon: a 65-hour weekend is
+    ~1.9x a 17.5-hour night, not 3.7x.
+    """
+    hours = closure_hours(ts)
+    if hours <= BASELINE_CLOSURE_HOURS:
+        return 1.0
+    import math
+    return float(min(CLOSURE_MAX_WIDEN, math.sqrt(hours / BASELINE_CLOSURE_HOURS)))
+
+
+def closure_label(ts: datetime) -> str:
+    """Plain-language name for the closure ahead: overnight, a weekend, or a long weekend."""
+    hours = closure_hours(ts)
+    if hours <= 0:
+        return 'market open'
+    if hours <= 24:
+        return 'overnight'
+    if hours <= 72:
+        return 'the weekend'
+    return 'a long holiday weekend'
+
+
 def has_earnings_tonight(symbol: str, ts: datetime,
                          earnings: dict[str, list[tuple[date, str | None]]]) -> bool:
     '''True if the symbol reports between this session's close and the next open.

@@ -99,15 +99,24 @@ class LeverageResult:
     frozen: bool = False
     sector_mult: float = 1.0
     sector_note: str = ''
+    closure_mult: float = 1.0
+    closure_hours: float = 0.0
+    closure_label: str = ''
+    basis_mult: float = 1.0
+    basis_note: str = ''
 
 
 def adverse_move(intraday_p99: float, gap_p99: float, earnings_gap_p99: float,
                  earnings_tonight: bool, phase: Phase, ramp: float,
-                 sector_mult: float = 1.0) -> float:
+                 sector_mult: float = 1.0, closure_mult: float = 1.0,
+                 basis_mult: float = 1.0) -> float:
     overnight = earnings_gap_p99 if earnings_tonight else gap_p99
-    # The sector signal only touches the overnight term -- it is evidence about the *gap*, and
-    # says nothing about how far price moves in the five minutes it takes us to exit intraday.
-    overnight *= max(1.0, sector_mult)
+    # Three signals widen the *overnight* term only. None touches intraday risk, because none
+    # says anything about how far price moves in the five minutes it takes us to exit:
+    #   sector_mult  -- the sector already moved in markets that were open
+    #   closure_mult -- this closure is longer than a normal night (a weekend is ~65 hours)
+    #   basis_mult   -- the perp has drifted from a stock that is not trading
+    overnight *= max(1.0, sector_mult) * max(1.0, closure_mult) * max(1.0, basis_mult)
     overnight = max(overnight, intraday_p99)
     if phase == Phase.OPEN:
         return intraday_p99
@@ -118,9 +127,12 @@ def adverse_move(intraday_p99: float, gap_p99: float, earnings_gap_p99: float,
 
 def adverse_move_vec(intraday_p99: np.ndarray, gap_p99: np.ndarray, earnings_gap_p99: np.ndarray,
                      earnings_tonight: np.ndarray, phase: Phase, ramp: float,
-                     sector_mult: np.ndarray | float = 1.0) -> np.ndarray:
+                     sector_mult: np.ndarray | float = 1.0,
+                     closure_mult: float = 1.0,
+                     basis_mult: np.ndarray | float = 1.0) -> np.ndarray:
     overnight = np.where(earnings_tonight, earnings_gap_p99, gap_p99)
-    overnight = overnight * np.maximum(1.0, sector_mult)
+    overnight = (overnight * np.maximum(1.0, sector_mult) * max(1.0, closure_mult)
+                 * np.maximum(1.0, basis_mult))
     overnight = np.maximum(overnight, intraday_p99)
     if phase == Phase.OPEN:
         return intraday_p99.copy()
@@ -161,9 +173,12 @@ def max_leverage_vec(adverse: np.ndarray, participation: np.ndarray, safety: flo
 
 def max_leverage(risk: SymbolRisk, notional: float, phase: Phase, ramp: float,
                  earnings_tonight: bool, safety: float, cap: float,
-                 sector_mult: float = 1.0, sector_note: str = '') -> LeverageResult:
+                 sector_mult: float = 1.0, sector_note: str = '',
+                 closure_mult: float = 1.0, closure_hours: float = 0.0,
+                 closure_label: str = '', basis_mult: float = 1.0,
+                 basis_note: str = '') -> LeverageResult:
     adv = adverse_move(risk.intraday_p99, risk.gap_p99, risk.earnings_gap_p99, earnings_tonight,
-                       phase, ramp, sector_mult)
+                       phase, ramp, sector_mult, closure_mult, basis_mult)
     reachable = max(risk.adv_dollar * liquidity_fraction(phase), 1.0)
     participation = abs(notional) / reachable
     slip = slippage(participation)
@@ -171,8 +186,13 @@ def max_leverage(risk: SymbolRisk, notional: float, phase: Phase, ramp: float,
     lev = float(_cap(haircut * safety / (adv + slip), cap))
     reason = (f'phase={phase.value} ramp={ramp:.2f} adverse={adv:.3f} slip={slip:.4f} '
               f'conc={haircut:.2f} participation={participation:.5f} '
-              f'earnings={str(earnings_tonight).lower()} sector={sector_mult:.2f} cap={cap:g}')
+              f'earnings={str(earnings_tonight).lower()} sector={sector_mult:.2f} '
+              f'closure={closure_mult:.2f}/{closure_hours:.0f}h basis={basis_mult:.2f} cap={cap:g}')
     return LeverageResult(symbol=risk.symbol, max_leverage=round(lev, 2), adverse_move=adv, slippage=slip,
                           concentration_haircut=haircut, phase=phase.value,
                           earnings_tonight=earnings_tonight, reason=reason,
-                          sector_mult=round(float(sector_mult), 4), sector_note=sector_note)
+                          sector_mult=round(float(sector_mult), 4), sector_note=sector_note,
+                          closure_mult=round(float(closure_mult), 4),
+                          closure_hours=round(float(closure_hours), 2),
+                          closure_label=closure_label,
+                          basis_mult=round(float(basis_mult), 4), basis_note=basis_note)

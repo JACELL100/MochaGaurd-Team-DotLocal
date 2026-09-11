@@ -14,7 +14,7 @@ import numpy as np
 from .config import settings
 from .engine import calendar as cal
 from .data import sectors
-from .engine import guards, leverage, margin
+from .engine import basis, guards, leverage, margin
 
 
 @dataclass
@@ -93,7 +93,8 @@ ACTIONABLE = ('reduce', 'margin_call', 'close')
 class BookState:
     def __init__(self, *, symbols, risk: dict[str, dict], accounts: list[Account],
                  positions: list[tuple[str, str, float]], earnings=None, splits=None,
-                 halts=None, daily=None, intraday=None, sector_moves=None):
+                 halts=None, daily=None, intraday=None, sector_moves=None,
+                 perp_marks=None):
         self.symbols = list(symbols)
         self.sym_idx = {s: i for i, s in enumerate(self.symbols)}
 
@@ -114,6 +115,9 @@ class BookState:
         # ticker -> {'move': float, 'session_d': date}. Loaded from the DB at startup; the
         # engine never queries for it while deciding.
         self.sector_moves: dict[str, dict] = sector_moves or {}
+        # symbol -> {'price': float, 'ts': datetime}. Populated from a perp venue feed when one
+        # is connected; empty means basis risk is reported as unmeasured, never as zero.
+        self.perp_marks: dict[str, dict] = perp_marks or {}
         self.daily: dict[str, DailySeries] = daily or {}
         self.intraday: dict[str, IntradaySeries] = intraday or {}
 
@@ -125,6 +129,10 @@ class BookState:
         self.pos_acct = np.array([self.acct_idx[p[0]] for p in pos], dtype=np.int64)
         self.pos_sym = np.array([self.sym_idx[p[1]] for p in pos], dtype=np.int64)
         self.pos_qty = np.array([float(p[2]) for p in pos], dtype=float)
+        # Entry price, for unrealised P&L on the trading view. NaN where unknown, so P&L is
+        # reported as unavailable rather than silently computed against a wrong basis.
+        self.pos_avg = np.array(
+            [float(p[3]) if len(p) > 3 and p[3] else np.nan for p in pos], dtype=float)
         self._index_positions()
 
     # ------------------------------------------------------------------ indexing
@@ -144,6 +152,7 @@ class BookState:
         c = copy.copy(self)
         c.cash = self.cash.copy()
         c.pos_qty = self.pos_qty.copy()
+        c.pos_avg = self.pos_avg.copy()
         return c
 
     def account(self, account_id: str) -> Account | None:
@@ -261,6 +270,35 @@ class BookState:
                     f"since the US close")
         return mult, note, detail
 
+    # ------------------------------------------------------------------ oracle / basis
+    def basis_signal(self, symbol: str, ts: datetime) -> tuple[float, str]:
+        """Margin multiplier from perp-vs-underlying drift, if a perp mark is known.
+
+        The book only carries underlying prices today, so with no perp feed this returns a
+        neutral 1.0 and says so. Wiring a venue mark into ``self.perp_marks`` turns it on
+        without touching the leverage formula -- the hook exists so basis risk is priced the
+        day the feed arrives, rather than being discovered after a liquidation.
+        """
+        mark = (self.perp_marks or {}).get(symbol)
+        if not mark or not mark.get('price'):
+            return 1.0, ''
+        i = self.sym_idx.get(symbol)
+        if i is None:
+            return 1.0, ''
+        price, price_ts = self.prices_at(ts)
+        underlying = float(price[i])
+        if underlying <= 0:
+            return 1.0, ''
+        # prices_at() stamps the *request* time when it falls back to a daily close, which
+        # would report a six-hour-old reference as fresh. Anchor staleness to the last real
+        # print instead: the close of the most recent session the market actually traded.
+        stamp = datetime.fromtimestamp(int(price_ts[i]) / 1e9, tz=timezone.utc)
+        if cal.phase_at(ts) not in (cal.Phase.OPEN, cal.Phase.CLOSING_RAMP):
+            last_close = cal.session_close(cal.reference_close_date(ts))
+            stamp = min(stamp, last_close)
+        state = basis.assess(symbol, float(mark['price']), underlying, stamp, ts)
+        return state.multiplier, state.note
+
     # ------------------------------------------------------------------ single-symbol leverage
     def symbol_risk(self, symbol: str) -> leverage.SymbolRisk:
         i = self.sym_idx[symbol]
@@ -275,9 +313,15 @@ class BookState:
         ramp = cal.ramp_fraction(ts)
         earn = cal.has_earnings_tonight(symbol, ts, self.earnings)
         sector_mult, sector_note, _ = self.sector_signal(symbol, ts)
+        closure_mult = cal.closure_multiplier(ts)
+        basis_mult, basis_note = self.basis_signal(symbol, ts)
         res = leverage.max_leverage(self.symbol_risk(symbol), notional, phase, ramp, earn,
                                     settings.safety, settings.headline_cap,
-                                    sector_mult=sector_mult, sector_note=sector_note)
+                                    sector_mult=sector_mult, sector_note=sector_note,
+                                    closure_mult=closure_mult,
+                                    closure_hours=cal.closure_hours(ts),
+                                    closure_label=cal.closure_label(ts),
+                                    basis_mult=basis_mult, basis_note=basis_note)
         price, price_ts = self.prices_at(ts)
         prev = self.prev_close_at(ts)
         snap = guards.SymbolSnapshot(
@@ -323,8 +367,11 @@ class BookState:
         # Same sector signal the single-symbol path uses, so /evaluate and /leverage can never
         # disagree about how wide tonight's gap could be.
         sector_mult = np.array([self.sector_signal(s, ts)[0] for s in self.symbols], dtype=float)
+        basis_mult = np.array([self.basis_signal(s, ts)[0] for s in self.symbols], dtype=float)
+        closure_mult = cal.closure_multiplier(ts)
         adverse = leverage.adverse_move_vec(self.intraday_p99, self.gap_p99, self.earnings_gap_p99,
-                                            earn, phase, ramp, sector_mult)
+                                            earn, phase, ramp, sector_mult, closure_mult,
+                                            basis_mult)
 
         ps = self.pos_sym
         px = price[ps]
@@ -389,6 +436,9 @@ class BookState:
             'frozen_symbols': [self.symbols[i] for i in np.nonzero(frozen)[0]],
             'sector_stress': [{'symbol': self.symbols[i], 'multiplier': round(float(sector_mult[i]), 3)}
                               for i in np.argsort(sector_mult)[::-1][:5] if sector_mult[i] > 1.0],
+            'closure': {'hours': round(cal.closure_hours(ts), 2),
+                        'label': cal.closure_label(ts),
+                        'multiplier': round(float(closure_mult), 3)},
             'earnings_tonight': [self.symbols[i] for i in np.nonzero(earn)[0]],
             'top_concentration': [{'symbol': self.symbols[i], 'notional': round(float(conc[i]), 2),
                                    'share': round(float(conc[i] / total_gross), 4) if total_gross else 0.0}
@@ -434,8 +484,20 @@ class BookState:
         for j in self.positions_of(a):
             s = int(self.pos_sym[j])
             px = float(result.prices[s])
-            rows.append({'symbol': self.symbols[s], 'qty': round(float(self.pos_qty[j]), 4),
-                         'price': round(px, 4), 'notional': round(abs(float(self.pos_qty[j]) * px), 2),
+            qty = float(self.pos_qty[j])
+            avg = float(self.pos_avg[j]) if j < len(self.pos_avg) else float('nan')
+            has_basis = avg == avg and avg > 0          # NaN-safe
+            pnl = (px - avg) * qty if has_basis else None
+            rows.append({'symbol': self.symbols[s], 'qty': round(qty, 4),
+                         'price': round(px, 4), 'notional': round(abs(qty * px), 2),
+                         'avg_price': round(avg, 4) if has_basis else None,
+                         'unrealised_pnl': round(pnl, 2) if pnl is not None else None,
+                         'unrealised_pct': round(px / avg - 1.0, 6) if has_basis else None,
+                         'day_change': round(px / float(self.last_close[s]) - 1.0, 6)
+                                       if float(self.last_close[s]) > 0 else None,
+                         'margin_required': round(abs(qty * px) / float(result.pos_max_leverage[j]), 2)
+                                            if float(result.pos_max_leverage[j]) > 0 else None,
+                         'worst_case_loss': round(abs(qty * px) * float(result.adverse_sym[s]), 2),
                          'max_leverage': round(float(result.pos_max_leverage[j]), 2),
                          'adverse_move': round(float(result.adverse_sym[s]), 4),
                          'earnings_tonight': bool(result.earnings_sym[s]),

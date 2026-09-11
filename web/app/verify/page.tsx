@@ -1,6 +1,8 @@
 import Link from "next/link";
 
-import { Badge, Banner, Mono, PageHeader, SourceBadge, inputClass } from "@/components/ui";
+import { Badge, Banner, Mono, inputClass } from "@/components/ui";
+import { StatusBar } from "@/components/trading/StatusBar";
+import { TerminalShell } from "@/components/trading/TerminalShell";
 import { getVerify } from "@/lib/api";
 import { actionLabel, actionTone, etDateTime, lev, money, pct, shares, shortHash } from "@/lib/format";
 import type { VerifyResult } from "@/lib/types";
@@ -20,12 +22,26 @@ export default async function VerifyPage({ searchParams }: { searchParams: Promi
   const res = decisionId !== null ? await getVerify(decisionId) : null;
 
   return (
-    <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full">
-      <PageHeader
-        title="Verify on Sepolia"
-        subtitle="Each day's decision log is Merkle-tree'd and the root is written to Sepolia. Only hashes go on-chain, never user data."
-        right={res && <SourceBadge live={res.live} error={res.error} />}
-      />
+    <>
+      <StatusBar engineLive={res?.live ?? true} />
+      <TerminalShell
+        eyebrow="Risk / Audit"
+        title="Decision audit trail"
+        live={res?.live ?? true}
+        error={res?.error}
+        meta={
+          res?.data
+            ? [
+                { label: "decision", value: `#${res.data.decision_id}` },
+                { label: "anchored", value: res.data.anchored ? "yes" : "pending",
+                  tone: res.data.anchored ? "default" : "warn" },
+                { label: "proof", value: res.data.valid ? "valid" : "unverified",
+                  tone: res.data.valid ? "default" : "danger" },
+                { label: "batch", value: res.data.batch_date ?? "–" },
+              ]
+            : [{ label: "chain", value: "Sepolia" }]
+        }
+      >
 
       <GlowingCard className="mb-8">
         <form method="get" className="flex flex-col gap-4 sm:flex-row sm:items-end">
@@ -58,7 +74,8 @@ export default async function VerifyPage({ searchParams }: { searchParams: Promi
       </GlowingCard>
 
       {res && (res.data ? <Result r={res.data} /> : <Banner tone="danger" icon="!" title="Live verification is unavailable" body={res.error ?? "The API did not return a verification result."} />)}
-    </div>
+      </TerminalShell>
+    </>
   );
 }
 

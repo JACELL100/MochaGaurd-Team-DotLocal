@@ -1,6 +1,8 @@
 import Link from "next/link";
 
-import { Badge, Banner, Mono, PageHeader, SourceBadge, Stat } from "@/components/ui";
+import { Badge, Banner, Mono, Stat } from "@/components/ui";
+import { StatusBar } from "@/components/trading/StatusBar";
+import { Panel, TerminalShell } from "@/components/trading/TerminalShell";
 import { GlowingCard } from "@/components/ui/GlowingCard";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { runSessionReplay } from "@/lib/api";
@@ -23,14 +25,28 @@ export default async function ScorePage({
 
   const { data, live, error } = await runSessionReplay({ date, step_minutes: step });
 
+  const sc = data?.scores;
   return (
-    <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full">
-      <PageHeader
-        title="Replay Score"
-        subtitle="One session stepped end to end on recorded bars: hold through the gap, unwind at the open, then score what it actually cost."
-        right={<SourceBadge live={live} error={error} />}
-      />
-
+    <>
+      <StatusBar engineLive={live} />
+      <TerminalShell
+        eyebrow="Risk / Replay"
+        title="Session P&L and score"
+        live={live}
+        error={error}
+        meta={
+          sc
+            ? [
+                { label: "session", value: data!.session_date },
+                { label: "broker loss", value: money(sc.broker_loss),
+                  tone: sc.broker_loss > 0 ? "danger" : "default" },
+                { label: "avg lev", value: lev(sc.capital_efficiency), tone: "accent" },
+                { label: "trust", value: pct(sc.user_trust, 0) },
+                { label: "fills", value: int(data!.fills) },
+              ]
+            : undefined
+        }
+      >
       {!data ? (
         <Banner
           tone="danger"
@@ -44,7 +60,8 @@ export default async function ScorePage({
       ) : (
         <Results data={data} step={step} />
       )}
-    </div>
+      </TerminalShell>
+    </>
   );
 }
 

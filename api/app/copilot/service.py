@@ -74,6 +74,23 @@ async def explain_decisions(book, result, decisions: list[dict]) -> None:
     await db.insert_explanations(rows)
 
 
+def _headline_for(facts: dict) -> str:
+    """One line naming the state and the deadline.
+
+    Deliberately not "You are safe tonight": the engine sizes against a 1-in-100 move, which is
+    not the same as safety, and a promise we cannot keep is the worst thing a risk product can
+    say to someone about to go to sleep.
+    """
+    status = facts['status']
+    if status == 'safe':
+        if facts.get('has_positions') == 'no':
+            return 'Nothing held overnight'
+        return 'No action needed before tonight\'s close'
+    if status == 'auto_derisk':
+        return 'We are reducing your positions to protect the account'
+    return f"Action needed before {facts['deadline_local']}"
+
+
 def digest_facts(account: dict, decisions: list[dict], result) -> dict:
     action = [d for d in decisions if d.get('action') in {'reduce', 'margin_call', 'close'}]
     status = 'auto_derisk' if any(d.get('action') == 'close' for d in action) else ('action_needed' if action else 'safe')
@@ -90,6 +107,8 @@ def digest_facts(account: dict, decisions: list[dict], result) -> dict:
         'leverage_used': f"{account['leverage_used'] or 0:.1f}x", 'margin_required': fmt_money(account['margin_required']),
         'worst_case_loss': fmt_money(account['worst_case_loss']),
         'worst_case_pct': fmt_pct(account['worst_case_loss'] / max(account['equity'], 1)),
+        # Jinja templates compare strings; a bool would render as 'True'/'False' in text.
+        'has_positions': 'yes' if account.get('positions') else 'no',
         'n_actions': len(action), 'flagged_symbols': symbols, 'earnings_symbols': earnings, 'frozen_symbols': frozen,
         'deadline_et': '4:00 PM ET', 'deadline_local': cal.local_time_str(deadline, tz),
         'derisk_et': '3:45 PM ET', 'derisk_local': cal.local_time_str(derisk, tz),
@@ -99,7 +118,7 @@ def digest_facts(account: dict, decisions: list[dict], result) -> dict:
 async def tonight_digest(account: dict, decisions: list[dict], result) -> dict:
     facts = digest_facts(account, decisions, result)
     fallback = _render('fallback_digest.j2', facts)
-    headline = 'You are safe tonight.' if facts['status'] == 'safe' else f"Action needed before {facts['deadline_local']}."
+    headline = _headline_for(facts)
     model = 'template'
     try:
         candidate = await llm.complete_json(_render('tonight_digest.j2', facts))
@@ -116,7 +135,7 @@ async def tonight_digest(account: dict, decisions: list[dict], result) -> dict:
 def deterministic_tonight_digest(account: dict, decisions: list[dict], result) -> dict:
     """A request-path digest that has no network or LLM dependency."""
     facts = digest_facts(account, decisions, result)
-    headline = 'You are safe tonight.' if facts['status'] == 'safe' else f"Action needed before {facts['deadline_local']}."
+    headline = _headline_for(facts)
     return {'status': facts['status'], 'headline': headline, 'summary': _render('fallback_digest.j2', facts),
             'model': 'template', 'deadline_et': facts['deadline_et'], 'deadline_local': facts['deadline_local'],
             'local_time': facts['user_local_time']}

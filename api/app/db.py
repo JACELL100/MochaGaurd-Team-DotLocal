@@ -292,7 +292,7 @@ async def load_book_payload() -> dict[str, Any]:
         accounts = [dict(r) for r in await conn.fetch(
             'select id, email, display_name, tz, cash from accounts order by created_at')]
         positions = [dict(r) for r in await conn.fetch(
-            'select account_id, symbol, qty from positions where qty <> 0')]
+            'select account_id, symbol, qty, avg_price from positions where qty <> 0')]
         earnings = await conn.fetch(
             'select symbol, report_date, timing from earnings where report_date >= current_date - 400')
         splits = await conn.fetch(

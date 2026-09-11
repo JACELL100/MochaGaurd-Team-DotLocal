@@ -64,8 +64,9 @@ async def load_book(intraday_start: datetime | None = None, intraday_end: dateti
     accounts = [Account(id=str(a['id']), tz=a['tz'] or 'UTC', cash=float(a['cash'] or 0.0), email=a['email'],
                         display_name=a['display_name']) for a in payload['accounts']]
     sym_set = set(symbols)
-    positions = [(str(p['account_id']), p['symbol'], float(p['qty'])) for p in payload['positions']
-                 if p['symbol'] in sym_set]
+    positions = [(str(p['account_id']), p['symbol'], float(p['qty']),
+                  float(p['avg_price']) if p.get('avg_price') else None)
+                 for p in payload['positions'] if p['symbol'] in sym_set]
     dropped = len(payload['positions']) - len(positions)
     if dropped:
         log.warning('%d positions reference symbols outside the universe and were ignored', dropped)

@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     safety: float = 0.30
     headline_cap: float = 20.0
 
+    # --- perpetual-futures carry
+    # Mochatrade's product is perps, where funding ("holding cost") is charged hourly on the
+    # full notional. Until a venue feed is wired in, this is the assumed hourly rate used to
+    # show users a *deadline* rather than a percentage. mochatrade.com displays ~0.0012%/hr.
+    funding_hourly_default: float = 0.000012
+    funding_feed_enabled: bool = False
+
     # --- service
     internal_api_key: str = ''            # server-to-server secret for /internal/accounts/sync only
     scheduler_enabled: bool = True

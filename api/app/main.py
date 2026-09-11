@@ -31,6 +31,7 @@ from .data.poller import QuotePoller
 from .data.precompute import compute_all
 from .data.yfinance import YFinance, YFinanceError
 from .engine import calendar as cal
+from .engine import funding as funding_engine
 from .engine import leverage as leverage_engine
 from .engine import replay as replay_engine
 
@@ -416,8 +417,119 @@ async def tonight(account_id: str, request: Request, principal: Annotated[Princi
                           'headline': explanation['headline'], 'body': explanation['body'], 'action_hint': explanation['action_hint'],
                           'qty_to_reduce': decision.get('qty_to_reduce'), 'max_leverage': decision.get('max_leverage'),
                           'model': explanation['model']})
+    # Perp carry: what each position costs to hold, and when funding alone would liquidate it.
+    rate_of = funding_engine.FundingRate
+    costs = []
+    for row in view['positions']:
+        rate = rate_of(row['symbol'], settings.funding_hourly_default)
+        costs.append(funding_engine.assess(
+            rate, symbol=row['symbol'], qty=row['qty'], price=row['price'], ts=result.ts,
+            equity=view['equity'], margin_required=view['margin_required']))
+    funding_rows = []
+    for row, cost in zip(view['positions'], costs):
+        described = funding_engine.describe(cost, view.get('tz') or 'UTC')
+        funding_rows.append({
+            'symbol': cost.symbol, 'side': cost.side, 'hourly_rate': rate_of(
+                cost.symbol, settings.funding_hourly_default).hourly,
+            'hourly_cost': cost.hourly_cost, 'daily_cost': cost.daily_cost,
+            'cost_to_next_open': cost.cost_to_next_open,
+            'hours_to_next_open': cost.hours_to_next_open,
+            'hours_to_liquidation': cost.hours_to_liquidation,
+            'liquidation_at': cost.liquidation_at.isoformat() if cost.liquidation_at else None,
+            'when': funding_engine.humanise_hours(cost.hours_to_liquidation),
+            'daily_share_of_buffer': cost.daily_share_of_buffer,
+            'pays': cost.pays, 'plain': described})
+        row['funding'] = funding_rows[-1]
+
+    closure = {'hours': round(cal.closure_hours(result.ts), 2),
+               'label': cal.closure_label(result.ts),
+               'multiplier': round(cal.closure_multiplier(result.ts), 3)}
+
+    # Why each position is risky, ranked, in plain language. "Reduce TSLA by 653 shares" is an
+    # instruction; this is the reason behind it, so a trader can see which factor to act on.
+    result.summary.setdefault('closure', closure)
+    risk_rows = []
+    for row in view['positions']:
+        breakdown = explain.position_risk(row, view, result, tz=view.get('tz') or 'UTC')
+        row['risk'] = breakdown
+        risk_rows.append(breakdown)
+    risk_rows.sort(key=lambda r: r['worst_case_loss'], reverse=True)
+
     digest = copilot.deterministic_tonight_digest(view, decisions, result)
-    return {'account': view, 'as_of': result.ts.isoformat(), 'decisions': decisions, 'cards': cards, **digest}
+    return {'account': view, 'as_of': result.ts.isoformat(), 'decisions': decisions,
+            'cards': cards, 'funding': funding_rows,
+            'funding_book': funding_engine.book_carry(costs), 'closure': closure,
+            'risk': risk_rows, **digest}
+
+
+@app.get('/desk/{account_id}')
+async def desk(account_id: str, request: Request,
+               _: Annotated[Principal, Depends(get_principal)], hours: int = 48):
+    """Chart series for the trading desk: real price bars with the allowed-leverage overlay.
+
+    One series per held symbol. ``max_leverage`` is recomputed at every bar with the engine's
+    own rule for that timestamp, so the line steps down through the 15:30 ramp and sits at the
+    overnight level while the market is shut -- the picture a trader needs to see *before* the
+    bell, not a static number.
+    """
+    service = service_of(request)
+    book = service.require_book()
+    await accessible_account(account_id)
+    if account_id not in book.acct_idx:
+        raise HTTPException(status_code=404, detail='Account has no live portfolio in the risk book')
+
+    result = await service.current_result()
+    view = book.account_view(account_id, result)
+    symbols = [row['symbol'] for row in view['positions']]
+    if not symbols:
+        return {'account_id': account_id, 'as_of': result.ts.isoformat(), 'series': []}
+
+    hours = max(6, min(int(hours), 24 * 14))
+    end = datetime.now(tz=timezone.utc)
+    rows = await db.intraday_between(end - timedelta(hours=hours), end + timedelta(minutes=5), symbols)
+
+    series = []
+    for row in view['positions']:
+        symbol = row['symbol']
+        bars = rows.get(symbol) or []
+        if not bars:
+            continue
+        # Cap the number of points so a two-week window stays a chart, not a payload.
+        stride = max(1, len(bars) // 320)
+        risk = book.symbol_risk(symbol)
+        points = []
+        for bar in bars[::stride]:
+            ts = bar['ts']
+            phase = cal.phase_at(ts)
+            sector_mult, _, _ = book.sector_signal(symbol, ts)
+            limit = leverage_engine.max_leverage(
+                risk, float(row['notional']) or 10_000.0, phase, cal.ramp_fraction(ts),
+                cal.has_earnings_tonight(symbol, ts, book.earnings),
+                settings.safety, settings.headline_cap, sector_mult=sector_mult)
+            frozen = (cal.is_halted(symbol, ts, book.halts)
+                      or cal.to_et(ts).date() in book.splits.get(symbol, set()))
+            points.append({'ts': ts.isoformat(), 'price': round(float(bar['close']), 4),
+                           'max_leverage': 0.0 if frozen else limit.max_leverage,
+                           'phase': phase.value, 'frozen': frozen})
+        if not points:
+            continue
+        first, last = points[0]['price'], points[-1]['price']
+        series.append({
+            'symbol': symbol, 'points': points,
+            'qty': row['qty'], 'notional': row['notional'], 'price': row['price'],
+            'avg_price': row['avg_price'], 'unrealised_pnl': row['unrealised_pnl'],
+            'unrealised_pct': row['unrealised_pct'],
+            'max_leverage': row['max_leverage'], 'adverse_move': row['adverse_move'],
+            'earnings_tonight': row['earnings_tonight'], 'frozen': row['frozen'],
+            'window_change': round(last / first - 1.0, 6) if first else 0.0,
+            'window_low': round(min(pt['price'] for pt in points), 4),
+            'window_high': round(max(pt['price'] for pt in points), 4),
+            'leverage_low': round(min(pt['max_leverage'] for pt in points), 2),
+            'leverage_high': round(max(pt['max_leverage'] for pt in points), 2),
+        })
+
+    return {'account_id': account_id, 'as_of': result.ts.isoformat(), 'phase': result.phase,
+            'headline_cap': settings.headline_cap, 'hours': hours, 'series': series}
 
 
 @app.post('/leverage')

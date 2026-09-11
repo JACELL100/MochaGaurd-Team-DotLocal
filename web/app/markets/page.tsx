@@ -1,4 +1,6 @@
-import { Card, Empty, Mono, PageHeader, SourceBadge, buttonClass, inputClass } from "@/components/ui";
+import { Card, Empty, Mono, buttonClass, inputClass } from "@/components/ui";
+import { StatusBar } from "@/components/trading/StatusBar";
+import { TerminalShell } from "@/components/trading/TerminalShell";
 import { getMarket } from "@/lib/api";
 
 export const metadata = { title: "Live markets" };
@@ -37,7 +39,18 @@ export default async function MarketsPage({ searchParams }: { searchParams: Prom
   const result = submitted ? await getMarket(kind, query) : null;
   return (
     <>
-      <PageHeader title="Live market data" subtitle="Alpha Vantage is primary; Yahoo Finance provides no-key quote/history fallback when its quota is unavailable." right={result && <SourceBadge live={result.live} error={result.error} />} />
+      <StatusBar engineLive={result?.live ?? true} />
+      <TerminalShell
+        eyebrow="Data / Feeds"
+        title="Market data feed"
+        live={result?.live ?? true}
+        error={result?.error}
+        meta={[
+          { label: "primary", value: "Alpha Vantage" },
+          { label: "fallback", value: "Yahoo Finance" },
+          { label: "query", value: kind },
+        ]}
+      >
       <div className="grid gap-4 lg:grid-cols-[360px_1fr]">
         <Card title="Query Alpha Vantage" subtitle="Choose a real data product and submit it through the authenticated Mochatrade API.">
           <form method="get" className="space-y-3 text-sm">
@@ -69,6 +82,7 @@ export default async function MarketsPage({ searchParams }: { searchParams: Prom
           {!result ? <Empty>Select a category and fetch a live response.</Empty> : !result.data ? <Empty>{result.error ?? "The provider did not return data."}</Empty> : <pre className="max-h-[620px] overflow-auto rounded-lg bg-surface-2 p-4 text-xs leading-5 text-foreground/85"><Mono>{JSON.stringify(result.data.data, null, 2)}</Mono></pre>}
         </Card>
       </div>
+      </TerminalShell>
     </>
   );
 }

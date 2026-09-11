@@ -1,4 +1,7 @@
-import { Badge, Banner, Mono, PageHeader, SourceBadge, Stat, inputClass } from "@/components/ui";
+import { Badge, Banner, Mono, Stat, inputClass } from "@/components/ui";
+import { StatusBar } from "@/components/trading/StatusBar";
+import { TerminalShell } from "@/components/trading/TerminalShell";
+import { LeverageWaterfall } from "@/components/charts/LeverageWaterfall";
 import { getLeverage } from "@/lib/api";
 import { etWallClock } from "@/lib/engine";
 import { etDateTime, lev, money, pct, phaseLabel } from "@/lib/format";
@@ -35,14 +38,31 @@ export default async function SimulatePage({ searchParams }: { searchParams: Pro
   const { data: r, live, error } = await getLeverage({ symbol, notional, ts, earnings_tonight: earnings });
 
   return (
-    <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full">
-      <PageHeader
-        title="Live Leverage Simulator"
-        subtitle="Test dynamic leverage limits, concentration haircuts, and earnings overnight buffers."
-        right={<SourceBadge live={live} error={error} />}
-      />
-
-      <div className="grid gap-6 lg:grid-cols-[360px_1fr] relative z-20">
+    <>
+      <StatusBar engineLive={live} />
+      <TerminalShell
+        eyebrow="Risk / Pricing"
+        title={`Why this limit · ${symbol}`}
+        live={live}
+        error={error}
+        meta={
+          r
+            ? [
+                { label: "allowed", value: r.frozen ? "0x" : lev(r.max_leverage), tone: "accent" },
+                {
+                  label: "of cap",
+                  value: r.explanation
+                    ? `${(r.explanation.attribution.utilisation * 100).toFixed(0)}%`
+                    : "–",
+                },
+                { label: "size", value: money(notional) },
+                { label: "phase", value: phaseLabel(r.phase) },
+                { label: "p99 move", value: pct(r.adverse_move, 1), tone: "warn" },
+              ]
+            : [{ label: "symbol", value: symbol }, { label: "size", value: money(notional) }]
+        }
+      >
+      <div className="grid gap-4 lg:grid-cols-[340px_1fr] relative z-20">
         <GlowingCard>
           <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-wider text-[#A78BFA] mb-4">
             <Calculator className="w-4 h-4" />
@@ -117,6 +137,14 @@ export default async function SimulatePage({ searchParams }: { searchParams: Pro
                 <div className={`tabular mt-2 text-6xl font-extrabold tracking-tight ${r.frozen ? "text-amber-400" : "text-white"}`}>
                   {r.frozen ? "Frozen" : lev(r.max_leverage)}
                 </div>
+                {r.explanation && (
+                  <div className="mt-1.5 text-sm text-[#94A3B8]">
+                    <span className="font-mono font-semibold text-[#C4B5FD]">
+                      {(r.explanation.attribution.utilisation * 100).toFixed(0)}%
+                    </span>{" "}
+                    of the {lev(r.explanation.attribution.cap)} we advertise
+                  </div>
+                )}
                 <div className="mt-3 flex flex-wrap gap-2">
                   <Badge tone={r.phase === "closing_ramp" ? "warn" : r.phase === "open" ? "safe" : "neutral"}>
                     {phaseLabel(r.phase)}
@@ -137,6 +165,8 @@ export default async function SimulatePage({ searchParams }: { searchParams: Pro
               </div>
             </div>
           </GlowingCard>
+
+          {r.explanation && <LeverageWaterfall attribution={r.explanation.attribution} />}
 
           {r.sector && r.sector.peers.length > 0 && (
             <GlowingCard>
@@ -290,6 +320,7 @@ export default async function SimulatePage({ searchParams }: { searchParams: Pro
         </div>
         )}
       </div>
-    </div>
+      </TerminalShell>
+    </>
   );
 }

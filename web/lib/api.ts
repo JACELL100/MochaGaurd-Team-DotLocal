@@ -8,6 +8,7 @@ import type {
   AccountSummary,
   ApiResult,
   BookResponse,
+  DeskResponse,
   LeverageResult,
   ReplayResult,
   SessionReplay,
@@ -102,6 +103,13 @@ export function getLeverage(params: {
 export function runSessionReplay(params: { date?: string; step_minutes?: number } = {}): Promise<ApiResult<SessionReplay>> {
   return withAvailability(() =>
     call<SessionReplay>("/replay/session", { method: "POST", body: JSON.stringify(params) }),
+  );
+}
+
+/** Price + allowed-leverage series for every symbol this account holds. */
+export function getDesk(accountId: string, hours = 48): Promise<ApiResult<DeskResponse>> {
+  return withAvailability(() =>
+    call<DeskResponse>(`/desk/${encodeURIComponent(accountId)}?hours=${hours}`),
   );
 }
 
