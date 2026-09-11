@@ -39,17 +39,31 @@ export default async function TonightPage({
 }) {
   const { account, hours: hoursParam } = await searchParams;
   const hours = Math.max(6, Math.min(336, Number(hoursParam) || 48));
-  const accountsRes = await getAccounts();
-  const accounts = accountsRes.data ?? [];
-
   const requested = typeof account === "string" ? account : undefined;
-  const fallback = accounts.find((a) => a.status !== "safe") ?? accounts[0];
-  const selected = requested ?? fallback?.id;
+  let selected: string | undefined = requested;
 
-  // Charts and briefing come from the same account, fetched together.
-  const [tonightRes, deskRes] = selected
-    ? await Promise.all([getTonight(selected), getDesk(selected, hours)])
-    : [null, null];
+  let accountsRes;
+  let tonightRes = null;
+  let deskRes = null;
+
+  if (requested) {
+    [accountsRes, tonightRes, deskRes] = await Promise.all([
+      getAccounts(),
+      getTonight(requested),
+      getDesk(requested, hours),
+    ]);
+  } else {
+    accountsRes = await getAccounts();
+    const fallback = (accountsRes.data ?? []).find((a) => a.status !== "safe") ?? accountsRes.data?.[0];
+    selected = fallback?.id;
+    if (selected) {
+      [tonightRes, deskRes] = await Promise.all([
+        getTonight(selected),
+        getDesk(selected, hours),
+      ]);
+    }
+  }
+  const accounts = accountsRes.data ?? [];
   // No stand-in briefing: a risk page that shows invented positions and deadlines is worse
   // than one that says it has nothing to show.
   const briefing = tonightRes?.data ?? null;

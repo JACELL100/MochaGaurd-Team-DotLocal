@@ -191,20 +191,6 @@ export default async function StressTestPage({
     allPortfoliosMap[liveBriefing.account.account_id] = liveBriefing.account;
   }
 
-  // Pre-load all available live accounts so switching is instantaneous
-  if (liveAccounts.length > 0) {
-    const liveResults = await Promise.allSettled(
-      liveAccounts
-        .filter((a) => a.id !== liveBriefing?.account?.account_id)
-        .map((a) => getTonight(a.id))
-    );
-    for (const res of liveResults) {
-      if (res.status === "fulfilled" && res.value?.data?.account) {
-        allPortfoliosMap[res.value.data.account.account_id] = res.value.data.account;
-      }
-    }
-  }
-
   return (
     <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full">
       <PageHeader
