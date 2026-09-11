@@ -10,10 +10,11 @@ import json
 import logging
 import uuid
 from contextlib import asynccontextmanager, suppress
-from datetime import date, datetime, timezone
-from typing import Annotated
+from datetime import date, datetime, timedelta, timezone
+from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -21,6 +22,7 @@ from . import db
 from .anchor import publisher
 from .auth import Principal, SupabaseAuth, get_principal
 from .config import settings
+from .copilot import chat as copilot_chat_module
 from .copilot import explain
 from .copilot import service as copilot
 from .data import halts as halt_detect
@@ -31,9 +33,11 @@ from .data.poller import QuotePoller
 from .data.precompute import compute_all
 from .data.yfinance import YFinance, YFinanceError
 from .engine import calendar as cal
+from .engine import funding as funding_engine
 from .engine import leverage as leverage_engine
 from .engine import replay as replay_engine
 from .notifications import telegram as telegram_notifier
+from .wallet import fetch_wallet_data, CHAIN_NAMES as WALLET_CHAIN_NAMES
 
 log = logging.getLogger('mochaguard.api')
 
@@ -56,6 +60,30 @@ class AccountSyncInput(BaseModel):
     tz: str = 'UTC'
     cash: float = Field(allow_inf_nan=False)
     positions: list[PositionInput]
+
+
+class WalletConnectInput(BaseModel):
+    wallet_address: str = Field(min_length=42, max_length=42,
+                                description='EVM address (0x-prefixed, 42 chars)')
+    chain_id: int = Field(default=1, description='EVM chain ID (1=Ethereum, 137=Polygon, etc.)')
+
+    @field_validator('wallet_address')
+    @classmethod
+    def normalize_address(cls, v: str) -> str:
+        v = v.strip()
+        if not v.startswith('0x'):
+            raise ValueError('wallet_address must start with 0x')
+        return v.lower()
+
+
+class WalletDisconnectInput(BaseModel):
+    wallet_address: str = Field(min_length=42, max_length=42)
+    chain_id: int = Field(default=1)
+
+    @field_validator('wallet_address')
+    @classmethod
+    def normalize_address(cls, v: str) -> str:
+        return v.strip().lower()
 
 
 class LeverageInput(BaseModel):
@@ -110,10 +138,8 @@ class LiveService:
         self.yf: YFinance | None = None
         self.poller: QuotePoller | None = None
         self.tasks: list[asyncio.Task] = []
-        self._background_tasks: set[asyncio.Task] = set()
         self._reload_lock = asyncio.Lock()
         self._evaluate_lock = asyncio.Lock()
-        self._persist_lock = asyncio.Lock()
         self._last_fingerprints: dict[str, str] = {}
         self._decision_ids: dict[tuple[str, str], int] = {}
 
@@ -138,8 +164,7 @@ class LiveService:
     async def _backfill_intraday(self) -> None:
         if not self.yf and not (self.av and settings.alpha_vantage_premium):
             return
-        book = self.require_book()
-        for symbol in book.symbols:
+        for symbol in self.book.symbols:
             try:
                 await self._backfill_symbol_intraday(symbol)
             except (AVError, QuotaExceeded, YFinanceError) as exc:
@@ -171,24 +196,10 @@ class LiveService:
         for task in self.tasks:
             with suppress(asyncio.CancelledError):
                 await task
-        if self._background_tasks:
-            _, pending = await asyncio.wait(
-                set(self._background_tasks), timeout=settings.llm_timeout_s + 2.0,
-            )
-            for task in pending:
-                task.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
         if self.av:
             await self.av.aclose()
         await self.auth.aclose()
-        await copilot.close()
         await db.close()
-
-    def _start_background(self, coro, *, name: str) -> None:
-        task = asyncio.create_task(coro, name=name)
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
 
     def require_book(self):
         if self.book is None or not self.book.symbols:
@@ -206,7 +217,7 @@ class LiveService:
             try:
                 if self.book and self.book.symbols:
                     await self.evaluate(datetime.now(tz=timezone.utc), record=True)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 log.exception('scheduled risk evaluation failed')
             await asyncio.sleep(max(15, settings.engine_evaluate_seconds))
 
@@ -220,31 +231,30 @@ class LiveService:
                 decision.id = self._decision_ids.get((self._decision_key(row), self._fingerprint(row)))
             self.latest = result
         if record:
-            self._start_background(self._persist_evaluation(book, result), name='decision-log')
+            asyncio.create_task(self._persist_evaluation(book, result), name='decision-log')
         return result
 
     async def _persist_evaluation(self, book, result) -> None:
-        async with self._persist_lock:
-            try:
-                decision_rows = [decision.to_dict() for decision in result.decisions]
-                current = {self._decision_key(row): self._fingerprint(row) for row in decision_rows}
-                changed = [row for row in decision_rows
-                           if self._last_fingerprints.get(self._decision_key(row)) != self._fingerprint(row)]
-                ids = await db.log_decisions(changed)
-                self._last_fingerprints = current
-                for row, decision_id in zip(changed, ids):
-                    row['id'] = decision_id
-                    self._decision_ids[(self._decision_key(row), self._fingerprint(row))] = decision_id
-                for decision in result.decisions:
-                    row = decision.to_dict()
-                    decision.id = self._decision_ids.get((self._decision_key(row), self._fingerprint(row)))
-                await db.insert_snapshot(result.ts, result.phase, result.summary)
-                if changed:
-                    await copilot.explain_decisions(book, result, changed)
-                await copilot.ensure_daily_briefs(book, result)
-            except Exception:
-                # An audit/narration failure must never affect the completed decision.
-                log.exception('failed to persist downstream decision artifacts')
+        try:
+            decision_rows = [decision.to_dict() for decision in result.decisions]
+            current = {self._decision_key(row): self._fingerprint(row) for row in decision_rows}
+            changed = [row for row in decision_rows
+                       if self._last_fingerprints.get(self._decision_key(row)) != self._fingerprint(row)]
+            ids = await db.log_decisions(changed)
+            self._last_fingerprints = current
+            for row, decision_id in zip(changed, ids):
+                row['id'] = decision_id
+                self._decision_ids[(self._decision_key(row), self._fingerprint(row))] = decision_id
+            for decision in result.decisions:
+                row = decision.to_dict()
+                decision.id = self._decision_ids.get((self._decision_key(row), self._fingerprint(row)))
+            await db.insert_snapshot(result.ts, result.phase, result.summary)
+            if changed:
+                await copilot.explain_decisions(book, result, changed)
+                await copilot.ops_brief(result)
+        except Exception:  # noqa: BLE001
+            # An audit/narration failure must never affect the completed decision.
+            log.exception('failed to persist downstream decision artifacts')
 
     @staticmethod
     def _decision_key(row: dict) -> str:
@@ -374,8 +384,7 @@ def account_status(result, account_id: str) -> str:
 async def health(request: Request):
     service = service_of(request)
     return {'ok': True, 'database': settings.db_configured, 'market_loaded': bool(service.book and service.book.symbols),
-            'alpha_vantage': bool(service.av), 'yfinance': bool(service.yf), 'groq': bool(settings.groq_api_key),
-            'chain_configured': settings.chain_configured}
+            'alpha_vantage': bool(service.av), 'yfinance': bool(service.yf), 'chain_configured': settings.chain_configured}
 
 
 @app.get('/me')
@@ -388,15 +397,12 @@ async def me(request: Request, principal: Annotated[Principal, Depends(get_princ
 async def dashboard_book(request: Request, _: Annotated[Principal, Depends(get_principal)]):
     service = service_of(request)
     result = await service.current_result()
-    brief = await copilot.ops_brief_for_request(service.require_book(), result)
-    if brief is None:
-        brief = copilot.deterministic_ops_brief(service.require_book(), result)
+    brief = await db.latest_ops_brief(datetime.now(tz=timezone.utc) - timedelta(days=1))
     # Every decision carries its own plain-language reason, so no screen ever shows a bare
     # machine string like "equity=79432 margin_req=95000" to a person.
     decisions = [{**decision_json(d), 'plain': explain.explain_decision(decision_json(d))}
                  for d in result.decisions]
-    return {'summary': result.summary, 'ops_brief': brief['body'],
-            'ops_brief_model': brief.get('model', 'template'),
+    return {'summary': result.summary, 'ops_brief': brief['body'] if brief else None,
             'plain': explain.explain_book(result.summary), 'decisions': decisions}
 
 
@@ -405,13 +411,12 @@ async def dashboard_accounts(request: Request, principal: Annotated[Principal, D
     service = service_of(request)
     accounts = await db.list_accounts()
     result = await service.current_result()
-    book = service.require_book()
     out = []
     for account in accounts:
         account_id = str(account['id'])
-        if account_id not in book.acct_idx:
+        if account_id not in service.require_book().acct_idx:
             continue
-        view = book.account_view(account_id, result)
+        view = service.book.account_view(account_id, result)
         out.append({'id': account_id, 'display_name': view['display_name'], 'tz': view['tz'], 'equity': view['equity'],
                     'status': account_status(result, account_id)})
     return out
@@ -420,71 +425,139 @@ async def dashboard_accounts(request: Request, principal: Annotated[Principal, D
 @app.get('/tonight/{account_id}')
 async def tonight(account_id: str, request: Request, principal: Annotated[Principal, Depends(get_principal)]):
     service = service_of(request)
-    await accessible_account(account_id)
+    account = await accessible_account(account_id)
     result = await service.current_result()
-    book = service.require_book()
-    if account_id not in book.acct_idx:
+    if account_id not in service.require_book().acct_idx:
         raise HTTPException(status_code=404, detail='Account has no live portfolio in the risk book')
-    view = book.account_view(account_id, result)
-    decisions = copilot.decisions_for_account(book, result, account_id, view)
+    view = service.book.account_view(account_id, result)
+    decisions = [decision_json(d) for d in result.decisions if d.account_id == account_id or
+                 (d.action == 'freeze' and any(p['symbol'] == d.symbol for p in view['positions']))]
     for decision in decisions:
         decision['plain'] = explain.explain_decision(decision, tz=view.get('tz'))
-
-    symbols = [position['symbol'] for position in view['positions']]
-    saved = await db.latest_relevant_decisions(account_id, symbols)
-    explanations = await db.explanations_for_decisions([int(row['id']) for row in saved], account_id)
+    saved = await db.recent_decisions(datetime.now(tz=timezone.utc) - timedelta(days=1), account_id)
+    explanations = await db.explanations_for_decisions([int(d['id']) for d in saved])
     cards = []
     for decision in decisions:
-        matching = next((row for row in saved
-                         if row.get('symbol') == decision.get('symbol')
-                         and row['action'] == decision['action']
-                         and service._fingerprint(row) == service._fingerprint(decision)), None)
+        matching = next((old for old in saved if old.get('symbol') == decision.get('symbol') and old['action'] == decision['action']), None)
         explanation = explanations.get(int(matching['id'])) if matching else None
-        if matching and decision.get('id') is None:
-            decision['id'] = matching['id']
-        card = copilot.deterministic_decision_card(decision, view, result.ts)
         if explanation:
-            card.update({
-                'decision_id': explanation['decision_id'],
-                'headline': explanation['headline'],
-                'body': explanation['body'],
-                'action_hint': explanation['action_hint'],
-                'model': explanation['model'],
-            })
-        cards.append(card)
+            cards.append({'decision_id': explanation['decision_id'], 'symbol': decision.get('symbol'), 'action': decision['action'],
+                          'headline': explanation['headline'], 'body': explanation['body'], 'action_hint': explanation['action_hint'],
+                          'qty_to_reduce': decision.get('qty_to_reduce'), 'max_leverage': decision.get('max_leverage'),
+                          'model': explanation['model']})
+    # Perp carry: what each position costs to hold, and when funding alone would liquidate it.
+    rate_of = funding_engine.FundingRate
+    costs = []
+    for row in view['positions']:
+        rate = rate_of(row['symbol'], settings.funding_hourly_default)
+        costs.append(funding_engine.assess(
+            rate, symbol=row['symbol'], qty=row['qty'], price=row['price'], ts=result.ts,
+            equity=view['equity'], margin_required=view['margin_required']))
+    funding_rows = []
+    for row, cost in zip(view['positions'], costs):
+        described = funding_engine.describe(cost, view.get('tz') or 'UTC')
+        funding_rows.append({
+            'symbol': cost.symbol, 'side': cost.side, 'hourly_rate': rate_of(
+                cost.symbol, settings.funding_hourly_default).hourly,
+            'hourly_cost': cost.hourly_cost, 'daily_cost': cost.daily_cost,
+            'cost_to_next_open': cost.cost_to_next_open,
+            'hours_to_next_open': cost.hours_to_next_open,
+            'hours_to_liquidation': cost.hours_to_liquidation,
+            'liquidation_at': cost.liquidation_at.isoformat() if cost.liquidation_at else None,
+            'when': funding_engine.humanise_hours(cost.hours_to_liquidation),
+            'daily_share_of_buffer': cost.daily_share_of_buffer,
+            'pays': cost.pays, 'plain': described})
+        row['funding'] = funding_rows[-1]
+
+    closure = {'hours': round(cal.closure_hours(result.ts), 2),
+               'label': cal.closure_label(result.ts),
+               'multiplier': round(cal.closure_multiplier(result.ts), 3)}
+
+    # Why each position is risky, ranked, in plain language. "Reduce TSLA by 653 shares" is an
+    # instruction; this is the reason behind it, so a trader can see which factor to act on.
+    result.summary.setdefault('closure', closure)
+    risk_rows = []
+    for row in view['positions']:
+        breakdown = explain.position_risk(row, view, result, tz=view.get('tz') or 'UTC')
+        row['risk'] = breakdown
+        risk_rows.append(breakdown)
+    risk_rows.sort(key=lambda r: r['worst_case_loss'], reverse=True)
 
     digest = copilot.deterministic_tonight_digest(view, decisions, result)
-    brief_date = cal.to_et(result.ts).date()
-    saved_digest = await db.daily_digest(account_id, brief_date)
-    if saved_digest is None and copilot.digest_due(result.ts):
-        saved_digest = await copilot.ensure_account_digest(view, decisions, result)
-    if saved_digest:
-        digest.update({
-            'headline': saved_digest['headline'],
-            'summary': saved_digest['body'],
-            'model': saved_digest['model'],
-        })
-    return {'account': view, 'as_of': result.ts.isoformat(), 'decisions': decisions, 'cards': cards, **digest}
+    return {'account': view, 'as_of': result.ts.isoformat(), 'decisions': decisions,
+            'cards': cards, 'funding': funding_rows,
+            'funding_book': funding_engine.book_carry(costs), 'closure': closure,
+            'risk': risk_rows, **digest}
 
 
-@app.get('/ops/daily-brief')
-async def daily_ops_brief(request: Request, _: Annotated[Principal, Depends(get_principal)]):
+@app.get('/desk/{account_id}')
+async def desk(account_id: str, request: Request,
+               _: Annotated[Principal, Depends(get_principal)], hours: int = 48):
+    """Chart series for the trading desk: real price bars with the allowed-leverage overlay.
+
+    One series per held symbol. ``max_leverage`` is recomputed at every bar with the engine's
+    own rule for that timestamp, so the line steps down through the 15:30 ramp and sits at the
+    overnight level while the market is shut -- the picture a trader needs to see *before* the
+    bell, not a static number.
+    """
     service = service_of(request)
+    book = service.require_book()
+    await accessible_account(account_id)
+    if account_id not in book.acct_idx:
+        raise HTTPException(status_code=404, detail='Account has no live portfolio in the risk book')
+
     result = await service.current_result()
-    brief = await copilot.ops_brief_for_request(service.require_book(), result)
-    if brief is None:
-        brief = {
-            **copilot.deterministic_ops_brief(service.require_book(), result),
-            'ts': result.ts,
-            'brief_date': cal.to_et(result.ts).date(),
-        }
-    return {
-        'date': str(brief.get('brief_date') or cal.to_et(result.ts).date()),
-        'as_of': (brief.get('ts') or result.ts).isoformat(),
-        'headline': brief.get('headline') or 'Daily risk brief',
-        'body': brief['body'],
-        'model': brief.get('model') or 'template',
-    }
+    view = book.account_view(account_id, result)
+    symbols = [row['symbol'] for row in view['positions']]
+    if not symbols:
+        return {'account_id': account_id, 'as_of': result.ts.isoformat(), 'series': []}
+
+    hours = max(6, min(int(hours), 24 * 14))
+    end = datetime.now(tz=timezone.utc)
+    rows = await db.intraday_between(end - timedelta(hours=hours), end + timedelta(minutes=5), symbols)
+
+    series = []
+    for row in view['positions']:
+        symbol = row['symbol']
+        bars = rows.get(symbol) or []
+        if not bars:
+            continue
+        # Cap the number of points so a two-week window stays a chart, not a payload.
+        stride = max(1, len(bars) // 320)
+        risk = book.symbol_risk(symbol)
+        points = []
+        for bar in bars[::stride]:
+            ts = bar['ts']
+            phase = cal.phase_at(ts)
+            sector_mult, _, _ = book.sector_signal(symbol, ts)
+            limit = leverage_engine.max_leverage(
+                risk, float(row['notional']) or 10_000.0, phase, cal.ramp_fraction(ts),
+                cal.has_earnings_tonight(symbol, ts, book.earnings),
+                settings.safety, settings.headline_cap, sector_mult=sector_mult)
+            frozen = (cal.is_halted(symbol, ts, book.halts)
+                      or cal.to_et(ts).date() in book.splits.get(symbol, set()))
+            points.append({'ts': ts.isoformat(), 'price': round(float(bar['close']), 4),
+                           'max_leverage': 0.0 if frozen else limit.max_leverage,
+                           'phase': phase.value, 'frozen': frozen})
+        if not points:
+            continue
+        first, last = points[0]['price'], points[-1]['price']
+        series.append({
+            'symbol': symbol, 'points': points,
+            'qty': row['qty'], 'notional': row['notional'], 'price': row['price'],
+            'avg_price': row['avg_price'], 'unrealised_pnl': row['unrealised_pnl'],
+            'unrealised_pct': row['unrealised_pct'],
+            'max_leverage': row['max_leverage'], 'adverse_move': row['adverse_move'],
+            'earnings_tonight': row['earnings_tonight'], 'frozen': row['frozen'],
+            'window_change': round(last / first - 1.0, 6) if first else 0.0,
+            'window_low': round(min(pt['price'] for pt in points), 4),
+            'window_high': round(max(pt['price'] for pt in points), 4),
+            'leverage_low': round(min(pt['max_leverage'] for pt in points), 2),
+            'leverage_high': round(max(pt['max_leverage'] for pt in points), 2),
+        })
+
+    return {'account_id': account_id, 'as_of': result.ts.isoformat(), 'phase': result.phase,
+            'headline_cap': settings.headline_cap, 'hours': hours, 'series': series}
 
 
 @app.post('/leverage')
@@ -493,13 +566,12 @@ async def leverage(input: LeverageInput, request: Request, _: Annotated[Principa
     ts = input.ts or datetime.now(tz=timezone.utc)
     if ts.tzinfo is None:
         raise HTTPException(status_code=422, detail='ts must include a timezone offset')
-    book = service.require_book()
     try:
-        result = book.symbol_leverage(input.symbol, ts, input.notional)
+        result = service.require_book().symbol_leverage(input.symbol, ts, input.notional)
     except KeyError:
         raise HTTPException(status_code=404, detail=f'{input.symbol} is not in the live risk universe') from None
-    risk = book.symbol_risk(input.symbol)
-    sector_mult, sector_note, peers = book.sector_signal(input.symbol, ts)
+    risk = service.book.symbol_risk(input.symbol)
+    sector_mult, sector_note, peers = service.book.sector_signal(input.symbol, ts)
     # The explanation is computed, not generated: no model call, no network, always present.
     return {**result.__dict__, 'ramp': cal.ramp_fraction(ts),
             'sector': {'sector': sectors.sector_of(input.symbol), 'multiplier': round(sector_mult, 4),
@@ -630,7 +702,7 @@ async def replay_session(input: SessionReplayInput, request: Request,
                 decision['id'] = decision_id
             await db.insert_liquidations(result.fills, run_id=run_id)
             await db.save_replay(run_id, session_date, summary, result.events, result.series)
-        except Exception:
+        except Exception:  # noqa: BLE001
             log.exception('replay persistence failed for %s', run_id)
 
     # Fills are persisted in full; the response carries a bounded sample so a 2,000-account
@@ -877,4 +949,176 @@ async def telegram_broadcast_all(input: TelegramBroadcastInput):
     )
     return {'broadcast': res, 'preview_message': msg}
 
+
+# ─────────────────────────────────────────────────────── wallet integration ──
+
+@app.post('/wallet/connect')
+async def wallet_connect(
+    input: WalletConnectInput,
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+):
+    """Connect a real EVM wallet: fetch on-chain balances via Alchemy, price via CoinGecko,
+    compute risk parameters, and push everything into the user's account in one shot."""
+    if not settings.alchemy_api_key or not settings.coingecko_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='Wallet integration is not configured on this server (missing ALCHEMY_API_KEY or COINGECKO_API_KEY)',
+        )
+
+    service    = service_of(request)
+    account    = await service.account_for(principal)
+    account_id = str(account['id'])
+
+    try:
+        wallet_data = await fetch_wallet_data(
+            input.wallet_address,
+            input.chain_id,
+            settings.alchemy_api_key,
+            settings.coingecko_api_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:
+        log.error('Wallet fetch failed for %s: %s', input.wallet_address, exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f'Failed to fetch wallet data: {exc}',
+        )
+
+    # ── Persist everything through the existing DB layer ─────────────────────
+    if wallet_data['symbols_to_upsert']:
+        await db.upsert_symbols(wallet_data['symbols_to_upsert'])
+
+    for symbol, bars in wallet_data['daily_bars'].items():
+        await db.upsert_bars_daily(symbol, bars)
+
+    for symbol, bars in wallet_data['intraday_bars'].items():
+        await db.upsert_bars_intraday(symbol, bars, source='coingecko')
+
+    if wallet_data['risk_rows']:
+        await db.upsert_symbol_risk(wallet_data['risk_rows'])
+
+    positions_for_db = [
+        {'symbol': p['symbol'], 'qty': p['qty'], 'avg_price': p.get('avg_price')}
+        for p in wallet_data['positions']
+    ]
+    await db.replace_positions(account_id, positions_for_db)
+    await db.update_account(account_id, cash=wallet_data['cash_usd'])
+    await db.save_wallet_connection(account_id, input.wallet_address, input.chain_id)
+
+    # Reload book so the risk engine immediately evaluates the new positions
+    await service.reload_book()
+
+    return {
+        'account_id':       account_id,
+        'positions_synced': len(positions_for_db),
+        **wallet_data['summary'],
+    }
+
+
+@app.get('/wallet/connections')
+async def wallet_connections(
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+):
+    """List all wallets the current user has connected."""
+    service    = service_of(request)
+    account    = await service.account_for(principal)
+    account_id = str(account['id'])
+    rows = await db.get_wallet_connections(account_id)
+    # Serialize datetimes for JSON
+    return [
+        {
+            **r,
+            'connected_at': r['connected_at'].isoformat() if r.get('connected_at') else None,
+            'last_synced':  r['last_synced'].isoformat()  if r.get('last_synced')  else None,
+            'chain_name':   WALLET_CHAIN_NAMES.get(r['chain_id'], f"chain-{r['chain_id']}"),
+        }
+        for r in rows
+    ]
+
+
+@app.post('/wallet/disconnect')
+async def wallet_disconnect(
+    input: WalletDisconnectInput,
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+):
+    """Disconnect a wallet. Does NOT wipe positions — call /wallet/connect on another wallet to replace them."""
+    service    = service_of(request)
+    account    = await service.account_for(principal)
+    account_id = str(account['id'])
+    await db.delete_wallet_connection(account_id, input.wallet_address, input.chain_id)
+    return {'ok': True, 'wallet_address': input.wallet_address, 'chain_id': input.chain_id}
+
+
+# ── Copilot chat ──────────────────────────────────────────────────────────────
+
+class ChatMessageInput(BaseModel):
+    role: str
+    content: Any  # str | list[dict] for multimodal (text + image_url)
+
+
+class ChatInput(BaseModel):
+    messages: list[ChatMessageInput]
+    account_id: str | None = None
+
+
+@app.post('/copilot/chat')
+async def copilot_chat_endpoint(
+    body: ChatInput,
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+):
+    """Streaming chat with the MochaGuard copilot.
+
+    Accepts a conversation history and an optional account_id so the copilot can answer
+    specific questions about live positions. Returns SSE tokens as they stream from Groq.
+    The risk engine's decisions are never modified here; this is narration only.
+    """
+    service = service_of(request)
+
+    # Inject live account context when available so the copilot can reference real numbers.
+    context_lines: list[str] = []
+    if body.account_id:
+        try:
+            result = await service.current_result()
+            view = service.book.account_view(str(body.account_id), result)
+            context_lines += [
+                f"Trader: {view.get('display_name') or 'Anonymous'}",
+                f"Equity: ${view.get('equity', 0):,.0f}",
+                f"Margin Required: ${view.get('margin_required', 0):,.0f}",
+                f"Gross Exposure: ${view.get('gross_exposure', 0):,.0f}",
+                f"Leverage Used: {view.get('leverage_used') or 0:.1f}x",
+                f"Worst-Case Loss (p99 gap): ${view.get('worst_case_loss', 0):,.0f}",
+            ]
+            positions = view.get('positions') or []
+            if positions:
+                context_lines.append(f"Open Positions ({len(positions)}):")
+                for p in positions:
+                    context_lines.append(
+                        f"  {p['symbol']}: qty={p['qty']:,.0f} @ ${p['price']:,.2f}"
+                        f" | notional=${p['notional']:,.0f}"
+                        f" | max_leverage={p['max_leverage']:.1f}x"
+                        f" | adverse_move={p['adverse_move'] * 100:.1f}%"
+                        + (' | EARNINGS TONIGHT' if p.get('earnings_tonight') else '')
+                        + (' | FROZEN' if p.get('frozen') else '')
+                    )
+        except Exception as exc:
+            log.debug('Could not inject account context for %s: %s', body.account_id, exc)
+
+    context = '\n'.join(context_lines) if context_lines else None
+    messages = [m.model_dump() for m in body.messages]
+
+    async def event_stream():
+        async for token in copilot_chat_module.stream_chat(messages, context=context):
+            yield f'data: {json.dumps({"token": token})}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    return StreamingResponse(
+        event_stream(),
+        media_type='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
 

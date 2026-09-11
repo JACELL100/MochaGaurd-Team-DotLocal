@@ -30,14 +30,16 @@ export function Header({ viewer = null }: { viewer?: Viewer | null }) {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
+  // Four workspaces, in the order a trader moves through them: the book, their own desk, why
+  // a limit is what it is, and what last night actually cost. /replay, /verify and /markets stay
+  // reachable by link and from decisions, but do not each claim a slot in the top bar.
   const navLinks = [
     { name: "Live Book", href: "/#console" },
     { name: "Tonight (2 AM)", href: "/tonight" },
     { name: "Stress Test", href: "/stress-test" },
-    { name: "Replay", href: "/replay" },
+    { name: "Why This Limit", href: "/simulate" },
     { name: "Score", href: "/score" },
-    { name: "Verify (Sepolia)", href: "/verify" },
-    { name: "Simulate", href: "/simulate" },
+    { name: "My Wallet", href: "/wallet" },
   ];
 
   return (

@@ -84,8 +84,13 @@ async def seed(n_accounts: int, seed_value: int = 7) -> dict:
         gross = equity * lev
         for p in picks:
             qty = gross / k / prices[p]
+            # Entry prices are scattered around the current mark so the book carries realistic
+            # unrealised P&L -- some winners, some losers. Sizing still uses the *current*
+            # price, so notional and margin are unaffected; only the cost basis varies.
+            drift = float(rng.normal(0.0, 0.06))
+            entry = max(0.01, float(prices[p]) * (1.0 - drift))
             positions.append((f'sample-{i + 1:05d}', symbols[p], round(float(qty), 6),
-                              round(float(prices[p]), 4)))
+                              round(entry, 4)))
         # equity = cash + market value, so a levered long carries a negative cash balance
         accounts.append((f'sample-{i + 1:05d}@{SAMPLE_DOMAIN}', f'Sample Trader {i + 1}', tz,
                          round(equity - gross, 2)))

@@ -1,7 +1,9 @@
 import Link from "next/link";
 
-import { Badge, Banner, PageHeader, SourceBadge, Stat, VerifyLink } from "@/components/ui";
-import { getAccounts, getTonight } from "@/lib/api";
+import { Badge, Banner, Stat, VerifyLink } from "@/components/ui";
+import { StatusBar } from "@/components/trading/StatusBar";
+import { TerminalShell } from "@/components/trading/TerminalShell";
+import { getAccounts, getDesk, getTonight } from "@/lib/api";
 import {
   actionLabel,
   actionTone,
@@ -11,23 +13,32 @@ import {
   pct,
   shares,
   statusTone,
+  timeIn,
   tzCity,
 } from "@/lib/format";
-import type { Explanation, TonightBriefing } from "@/lib/types";
+import type { Explanation } from "@/lib/types";
+import { AccountHeader } from "@/components/trading/AccountHeader";
+import { DeskChartsPanel } from "@/components/trading/DeskChartsPanel";
+import { HoldingCost } from "@/components/trading/HoldingCost";
+import { RiskPanel } from "@/components/trading/RiskBreakdown";
+import { PositionsBlotter } from "@/components/trading/PositionsBlotter";
 import { PlainReason } from "@/components/ui/PlainReason";
 import { AccountPicker } from "./AccountPicker";
 import { GlowingCard } from "@/components/ui/GlowingCard";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-
-
-import { Zap, ArrowRight, ShieldCheck, ShieldAlert, AlertTriangle } from "lucide-react";
+import { Moon, ShieldCheck, ShieldAlert, AlertTriangle, Clock, Terminal, Zap, ArrowRight } from "lucide-react";
 import { AlertLauncher } from "./AlertLauncher";
 
 export const metadata = { title: "Tonight" };
 
 
-export default async function TonightPage({ searchParams }: { searchParams: Promise<{ account?: string }> }) {
-  const { account } = await searchParams;
+export default async function TonightPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ account?: string; hours?: string }>;
+}) {
+  const { account, hours: hoursParam } = await searchParams;
+  const hours = Math.max(6, Math.min(336, Number(hoursParam) || 48));
   const accountsRes = await getAccounts();
   const accounts = accountsRes.data ?? [];
 
@@ -35,28 +46,48 @@ export default async function TonightPage({ searchParams }: { searchParams: Prom
   const fallback = accounts.find((a) => a.status !== "safe") ?? accounts[0];
   const selected = requested ?? fallback?.id;
 
-  const tonightRes = selected ? await getTonight(selected) : null;
+  // Charts and briefing come from the same account, fetched together.
+  const [tonightRes, deskRes] = selected
+    ? await Promise.all([getTonight(selected), getDesk(selected, hours)])
+    : [null, null];
   // No stand-in briefing: a risk page that shows invented positions and deadlines is worse
   // than one that says it has nothing to show.
   const briefing = tonightRes?.data ?? null;
   const live = accountsRes.live && (tonightRes?.live ?? true);
   const error = accountsRes.error ?? tonightRes?.error ?? null;
 
+  const acct = briefing?.account;
   return (
-    <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full">
-      <PageHeader
-        title="Tonight (The 2 AM Problem)"
-        subtitle="The sleep-safe briefing a trader reviews before bed. Every sentence is a decided fact, translated."
-        right={
-          <div className="flex items-center gap-3">
-            {selected && accounts.length > 0 && <AccountPicker accounts={accounts} selected={selected} />}
-            <SourceBadge live={live} error={error} />
-          </div>
+    <>
+      <StatusBar engineLive={live} />
+      <TerminalShell
+        eyebrow="Trading / Desk"
+        title={acct?.display_name ?? "Trading desk"}
+        live={live}
+        error={error}
+        meta={
+          acct
+            ? [
+                { label: "equity", value: money(acct.equity) },
+                { label: "exposure", value: money(acct.gross_exposure), tone: "accent" },
+                { label: "lev used", value: lev(acct.leverage_used), tone: "accent" },
+                {
+                  label: "margin",
+                  value: acct.margin_ratio !== null ? acct.margin_ratio.toFixed(2) : "–",
+                  tone: acct.margin_ratio !== null && acct.margin_ratio < 1.25 ? "danger" : "default",
+                },
+                { label: "act by", value: briefing.deadline_local, tone: "warn" },
+              ]
+            : undefined
         }
-      />
-
+        actions={
+          selected && accounts.length > 0 ? (
+            <AccountPicker accounts={accounts} selected={selected} />
+          ) : undefined
+        }
+      >
       {briefing ? (
-        <Briefing b={briefing} />
+        <Briefing b={briefing} desk={deskRes?.data ?? null} hours={hours} selected={selected} />
       ) : (
         <Banner
           tone={error ? "danger" : "warn"}
@@ -68,24 +99,28 @@ export default async function TonightPage({ searchParams }: { searchParams: Prom
           }
         />
       )}
-    </div>
+      </TerminalShell>
+    </>
   );
 }
 
-function Briefing({ b }: { b: TonightBriefing }) {
+function Briefing({
+  b,
+  desk,
+  hours,
+  selected,
+}: {
+  b: any;
+  desk: import("@/lib/types").DeskResponse | null;
+  hours: number;
+  selected?: string;
+}) {
   const a = b.account;
   const tone = statusTone(b.status);
-  const icon =
-    b.status === "safe" ? (
-      <ShieldCheck className="w-8 h-8 text-[#10B981]" />
-    ) : b.status === "auto_derisk" ? (
-      <ShieldAlert className="w-8 h-8 text-[#EF4444]" />
-    ) : (
-      <AlertTriangle className="w-8 h-8 text-[#F59E0B]" />
-    );
-  const actionable = b.cards.filter((card) => card.action !== "freeze");
-  const frozen = b.cards.filter((card) => card.action === "freeze");
-  const plainDecisions = b.decisions.filter((decision) => decision.plain);
+  const icon = b.status === "safe" ? "✅" : b.status === "auto_derisk" ? "🛑" : "⚠️";
+  const actionable = b.cards.filter((c: any) => c.action !== "freeze");
+  const frozen = b.cards.filter((c: any) => c.action === "freeze");
+  const plainDecisions = (b.decisions ?? []).filter((d: any) => d.plain);
 
   return (
     <div className="space-y-6 relative z-20">
@@ -104,30 +139,12 @@ function Briefing({ b }: { b: TonightBriefing }) {
             <div className="mt-0.5 text-xs text-[#64748B]">
               {etTime(b.as_of)} in New York · deadline {b.deadline_local} ({b.deadline_et})
             </div>
-            <div className="mt-1 text-[10px] font-mono text-[#64748B]">
-              {b.model === "template" ? "Deterministic briefing fallback" : `Groq briefing · ${b.model}`}
-            </div>
           </div>
         }
       />
 
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
-        <Stat label="Equity" value={money(a.equity)} hint={`cash ${money(a.cash)}`} />
-        <Stat label="Gross exposure" value={money(a.gross_exposure)} hint={`${lev(a.leverage_used)} leverage used`} />
-        <Stat
-          label="Margin required"
-          value={money(a.margin_required)}
-          hint={a.margin_ratio !== null ? `ratio ${a.margin_ratio.toFixed(2)}` : "no positions"}
-          tone={a.margin_ratio !== null && a.margin_ratio < 1 ? "danger" : "neutral"}
-        />
-        <Stat
-          label="Worst case tonight"
-          value={money(a.worst_case_loss)}
-          hint={`${pct(a.worst_case_loss / Math.max(a.equity, 1), 0)} of equity at p99`}
-          tone={a.worst_case_loss >= a.equity ? "danger" : "warn"}
-        />
-        <Stat label="Deadline" value={b.deadline_local} hint={b.deadline_et} tone="accent" />
-      </div>
+      {/* The terminal strip: the numbers a broker puts above the blotter. */}
+      <AccountHeader account={a} />
 
       {/* Interactive Sentinel & Simulator Action Deck */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -159,11 +176,35 @@ function Briefing({ b }: { b: TonightBriefing }) {
         />
       </div>
 
+      {desk && desk.series.length > 0 && (
+        <GlowingCard>
+          <DeskChartsPanel desk={desk} hours={hours} accountId={selected} />
+        </GlowingCard>
+      )}
+
+      {/* The deadline, in the trader's own timezone. The status bar carries the clock; this
+          carries the two moments that matter and what happens if nobody acts. */}
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border border-amber-500/25 bg-amber-500/5 px-4 py-2.5 text-xs">
+        <span className="font-mono text-[10px] uppercase tracking-wider text-amber-300/80">
+          Deadline
+        </span>
+        <span className="text-[#CBD5E1]">
+          Act by{" "}
+          <span className="font-mono font-semibold text-white">{b.deadline_local}</span>{" "}
+          <span className="text-[#64748B]">({b.deadline_et}, {tzCity(a.tz)})</span>
+        </span>
+        <span className="text-[#CBD5E1]">
+          Auto de-risk{" "}
+          <span className="font-mono font-semibold text-amber-300">3:45 PM ET</span>{" "}
+          <span className="text-[#64748B]">if nobody responds</span>
+        </span>
+      </div>
+
       {actionable.length > 0 && (
         <section>
           <h2 className="mb-3 text-sm font-semibold tracking-wide text-white">What to do before {b.deadline_local}</h2>
           <div className="grid gap-4 md:grid-cols-2">
-            {actionable.map((c, i) => (
+            {actionable.map((c: any, i: number) => (
               <ExplanationCard key={c.decision_id ?? i} c={c} tz={a.tz} />
             ))}
           </div>
@@ -177,7 +218,7 @@ function Briefing({ b }: { b: TonightBriefing }) {
         <section>
           <h2 className="mb-3 text-sm font-semibold tracking-wide text-white">Why the engine acted</h2>
           <div className="grid gap-3 md:grid-cols-2">
-            {plainDecisions.map((d, i) => (
+            {plainDecisions.map((d: any, i: number) => (
               <PlainReason key={d.id ?? `p${i}`} plain={d.plain} raw={d.reason} />
             ))}
           </div>
@@ -186,62 +227,34 @@ function Briefing({ b }: { b: TonightBriefing }) {
 
       {frozen.length > 0 && (
         <section className="grid gap-4 md:grid-cols-2">
-          {frozen.map((c, i) => (
+          {frozen.map((c: any, i: number) => (
             <ExplanationCard key={c.decision_id ?? `f${i}`} c={c} tz={a.tz} />
           ))}
         </section>
       )}
 
-      <GlowingCard>
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h3 className="text-sm font-semibold text-white">Active Account Positions</h3>
-            <p className="text-xs text-[#94A3B8]">Allowed leverage is per position: overnight gap risk, earnings, and liquidity footprint.</p>
-          </div>
-          <Link href={`/simulate?symbol=${a.positions[0]?.symbol ?? "NVDA"}`} className="text-xs text-[#A78BFA] hover:underline">
-            Open in simulator →
-          </Link>
-        </div>
+      {/* Why the risk exists, before what to do about it. An instruction without a reason is
+          the thing traders distrust about risk systems. */}
+      {b.risk && b.risk.length > 0 && (
+        <GlowingCard>
+          <RiskPanel risk={b.risk} />
+        </GlowingCard>
+      )}
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs font-mono">
-            <thead className="text-left text-[11px] uppercase tracking-wider text-[#64748B] border-b border-[#1C1836]">
-              <tr>
-                <th className="pb-2.5 pr-4 font-medium">Symbol</th>
-                <th className="pb-2.5 pr-4 text-right font-medium">Qty</th>
-                <th className="pb-2.5 pr-4 text-right font-medium">Price</th>
-                <th className="pb-2.5 pr-4 text-right font-medium">Notional</th>
-                <th className="pb-2.5 pr-4 text-right font-medium">Allowed Lev</th>
-                <th className="pb-2.5 pr-4 text-right font-medium">p99 Move</th>
-                <th className="pb-2.5 font-medium">Flags</th>
-              </tr>
-            </thead>
-            <tbody className="tabular divide-y divide-[#1C1836]/60">
-              {a.positions.map((p) => (
-                <tr key={p.symbol} className="hover:bg-[#121024]/40 transition-colors">
-                  <td className="py-2.5 pr-4 font-semibold text-white">{p.symbol}</td>
-                  <td className="py-2.5 pr-4 text-right text-[#CBD5E1]">{shares(p.qty)}</td>
-                  <td className="py-2.5 pr-4 text-right text-[#CBD5E1]">{money(p.price, true)}</td>
-                  <td className="py-2.5 pr-4 text-right text-white">{money(p.notional)}</td>
-                  <td className="py-2.5 pr-4 text-right text-[#C4B5FD]">{lev(p.max_leverage)}</td>
-                  <td className="py-2.5 pr-4 text-right text-[#CBD5E1]">{pct(p.adverse_move)}</td>
-                  <td className="py-2.5">
-                    <div className="flex gap-1.5">
-                      {p.earnings_tonight && <StatusBadge tone="warn">Earnings Tonight</StatusBadge>}
-                      {p.frozen && <StatusBadge tone="accent">Frozen</StatusBadge>}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      <GlowingCard>
+        <PositionsBlotter positions={a.positions} equity={a.equity} />
       </GlowingCard>
+
+      {b.funding && b.funding.length > 0 && (
+        <GlowingCard>
+          <HoldingCost funding={b.funding} book={b.funding_book} closure={b.closure} />
+        </GlowingCard>
+      )}
     </div>
   );
 }
 
-function ExplanationCard({ c, tz }: { c: Explanation; tz: string }) {
+function ExplanationCard({ c, tz }: { c: any; tz: string }) {
   const tone = actionTone(c.action);
   return (
     <GlowingCard className="h-full flex flex-col justify-between">
@@ -263,7 +276,7 @@ function ExplanationCard({ c, tz }: { c: Explanation; tz: string }) {
         )}
       </div>
       <p className="mt-4 pt-3 border-t border-[#1C1836] text-[10px] text-[#64748B] font-mono">
-        Local timezone {tz} · {c.model === "template" ? "Deterministic fact template" : `Grounded Groq narration: ${c.model}`}
+        Local timezone {tz} · Grounded LLM: {c.model}
       </p>
     </GlowingCard>
   );

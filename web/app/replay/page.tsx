@@ -1,4 +1,6 @@
-import { Badge, Banner, PageHeader, SourceBadge, Stat, inputClass } from "@/components/ui";
+import { Badge, Banner, Stat, inputClass } from "@/components/ui";
+import { StatusBar } from "@/components/trading/StatusBar";
+import { TerminalShell } from "@/components/trading/TerminalShell";
 import { getReplay } from "@/lib/api";
 import { int, lev, money, pct } from "@/lib/format";
 import { ReplayTimeline } from "./ReplayTimeline";
@@ -22,12 +24,14 @@ export default async function ReplayPage({ searchParams }: { searchParams: Promi
 
   if (!data) {
     return (
-      <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full">
-        <PageHeader
-          title="Historical Risk Review"
-          subtitle="Current risk rules applied to persisted, actual market bars. This view never simulates prices or trades."
-          right={<SourceBadge live={live} error={error} />}
-        />
+      <>
+        <StatusBar engineLive={live} />
+        <TerminalShell
+          eyebrow="Risk / Session tape"
+          title={`Session review · ${symbol}`}
+          live={live}
+          error={error}
+        >
         <Banner
           tone="danger"
           icon="!"
@@ -37,7 +41,8 @@ export default async function ReplayPage({ searchParams }: { searchParams: Promi
             "Intraday history for this symbol and date has not been persisted yet. Seed it on the API with scripts/seed_market.py, then reload."
           }
         />
-      </div>
+        </TerminalShell>
+      </>
     );
   }
 
@@ -45,12 +50,23 @@ export default async function ReplayPage({ searchParams }: { searchParams: Promi
   const symbols = data.symbols.length ? data.symbols : [data.symbol];
 
   return (
-    <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full">
-      <PageHeader
-        title="Historical Risk Review"
-        subtitle="Current risk rules applied to persisted, actual market bars. This view never simulates prices or trades."
-        right={
-          <div className="flex items-center gap-3">
+    <>
+      <StatusBar engineLive={live} />
+      <TerminalShell
+        eyebrow="Risk / Session tape"
+        title={`Session review · ${data.symbol}`}
+        live={live}
+        error={error}
+        meta={[
+          { label: "date", value: data.date },
+          { label: "open", value: money(s.open_price, true) },
+          { label: "close", value: money(s.close_price, true) },
+          { label: "change", value: pct(s.price_change, 2),
+            tone: s.price_change < 0 ? "danger" : "default" },
+          { label: "min allowed", value: lev(s.min_allowed_leverage), tone: "accent" },
+          { label: "bars", value: int(s.bars) },
+        ]}
+        actions={
             <form method="get" className="flex items-center gap-2">
               <select name="symbol" defaultValue={data.symbol} className={`${inputClass} w-auto bg-[#0B0A14] border-[#231F42] text-xs font-mono`} aria-label="Symbol">
                 {symbols.map((sym: string) => (
@@ -60,14 +76,12 @@ export default async function ReplayPage({ searchParams }: { searchParams: Promi
                 ))}
               </select>
               <input type="date" name="date" defaultValue={data.date} className={`${inputClass} w-auto bg-[#0B0A14] border-[#231F42] text-xs font-mono`} aria-label="Session date" />
-              <button type="submit" className="px-4 py-2 rounded-lg text-xs font-semibold text-white bg-gradient-to-r from-[#7C3AED] to-[#6D28D9] shadow-[0_0_15px_rgba(124,58,237,0.4)]">
+              <button type="submit" className="rounded-lg bg-gradient-to-r from-[#7C3AED] to-[#6D28D9] px-3 py-1.5 text-xs font-semibold text-white">
                 Run
               </button>
             </form>
-            <SourceBadge live={live} error={error} />
-          </div>
         }
-      />
+      >
 
       {!live && (
         <div className="mb-6 p-3 rounded-xl bg-[#7C3AED]/15 border border-[#7C3AED]/30 flex items-center justify-between text-xs text-[#C4B5FD]">
@@ -89,9 +103,11 @@ export default async function ReplayPage({ searchParams }: { searchParams: Promi
         <ReplayTimeline replay={data as any} />
       </GlowingCard>
 
-      <p className="mt-4 text-xs text-[#64748B] font-mono">
-        <Badge tone="neutral">{data.points.length} bars</Badge> actual intraday prints from configured market providers.
+      <p className="text-xs font-mono text-[#64748B]">
+        <Badge tone="neutral">{data.points.length} bars</Badge> actual intraday prints from
+        configured market providers. Rules are applied to recorded prices; nothing is simulated.
       </p>
-    </div>
+      </TerminalShell>
+    </>
   );
 }

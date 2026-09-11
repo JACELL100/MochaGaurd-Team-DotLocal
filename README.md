@@ -2,8 +2,6 @@
 
 Mochatrade Risk is a live risk service for linked brokerage accounts. It calculates leverage and overnight margin from persisted, split-adjusted Alpha Vantage data; stores decisions in Supabase; generates bounded, fact-grounded Groq explanations downstream; and anchors daily decision commitments on Sepolia.
 
-The copilot narrates only completed engine decisions. Changed actionable decisions receive per-position explanations, each account receives one persisted Tonight digest at 15:30 ET, and the risk desk receives one daily book brief at 15:00 ET. Every Groq response is JSON-validated and rejected if it introduces a number outside the fact pack; deterministic Jinja templates keep `/tonight/{account_id}` and `/ops/daily-brief` available during provider failures.
-
 It deliberately has no demo fallback. If authentication, market data, or the API is unavailable, the UI says so instead of rendering invented values.
 
 ## Configuration

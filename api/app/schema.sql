@@ -170,23 +170,15 @@ create table if not exists decision_explanations (
   decision_id  bigint references risk_decisions,
   account_id   uuid,
   ts           timestamptz not null,
-  brief_date   date,                             -- ET date for once-daily digest / ops rows
-  audience     text not null,                    -- 'user' | 'digest' | 'ops'
+  audience     text not null,                    -- 'user' | 'ops'
   headline     text,
   body         text,
   action_hint  text,
   model        text,                             -- llm model id or 'template'
   created_at   timestamptz not null default now()
 );
-alter table decision_explanations add column if not exists brief_date date;
 create index if not exists decision_explanations_acct_idx on decision_explanations (account_id, ts desc);
 create index if not exists decision_explanations_decision_idx on decision_explanations (decision_id);
-create unique index if not exists decision_explanations_daily_digest_key
-  on decision_explanations (account_id, brief_date)
-  where audience = 'digest' and account_id is not null and brief_date is not null;
-create unique index if not exists decision_explanations_daily_ops_key
-  on decision_explanations (brief_date)
-  where audience = 'ops' and brief_date is not null;
 
 -- On-chain anchoring
 create table if not exists anchor_batches (
@@ -236,3 +228,19 @@ begin
     execute format('alter table %I enable row level security', t);
   end loop;
 end $$;
+
+-- Wallet integration
+alter table symbols add column if not exists chain text;
+alter table symbols add column if not exists contract_address text;
+
+create table if not exists wallet_connections (
+  id             bigserial primary key,
+  account_id     uuid not null references accounts on delete cascade,
+  wallet_address text not null,
+  chain_id       int not null default 1,
+  label          text,
+  connected_at   timestamptz not null default now(),
+  last_synced    timestamptz,
+  unique (account_id, wallet_address, chain_id)
+);
+alter table wallet_connections enable row level security;

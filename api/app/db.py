@@ -292,7 +292,7 @@ async def load_book_payload() -> dict[str, Any]:
         accounts = [dict(r) for r in await conn.fetch(
             'select id, email, display_name, tz, cash from accounts order by created_at')]
         positions = [dict(r) for r in await conn.fetch(
-            'select account_id, symbol, qty from positions where qty <> 0')]
+            'select account_id, symbol, qty, avg_price from positions where qty <> 0')]
         earnings = await conn.fetch(
             'select symbol, report_date, timing from earnings where report_date >= current_date - 400')
         splits = await conn.fetch(
@@ -447,56 +447,20 @@ async def insert_explanations(rows: list[dict]) -> None:
         return
     async with pool().acquire() as conn:
         await conn.executemany(
-            '''insert into decision_explanations
-                   (decision_id, account_id, ts, brief_date, audience, headline, body, action_hint, model)
-               values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-               on conflict do nothing''',
-            [(r.get('decision_id'), _uuid(r.get('account_id')), r['ts'], r.get('brief_date'), r['audience'],
-              r.get('headline'), r.get('body'), r.get('action_hint'), r.get('model')) for r in rows])
+            '''insert into decision_explanations (decision_id, account_id, ts, audience, headline, body, action_hint, model)
+               values ($1, $2, $3, $4, $5, $6, $7, $8)''',
+            [(r.get('decision_id'), _uuid(r.get('account_id')), r['ts'], r['audience'], r.get('headline'),
+              r.get('body'), r.get('action_hint'), r.get('model')) for r in rows])
 
 
-async def explanations_for_decisions(decision_ids: list[int], account_id: str | None = None) -> dict[int, dict]:
+async def explanations_for_decisions(decision_ids: list[int]) -> dict[int, dict]:
     if not decision_ids:
         return {}
     rows = await pool().fetch(
         '''select distinct on (decision_id) * from decision_explanations
-           where decision_id = any($1::bigint[]) and audience = 'user'
-             and ($2::uuid is null or account_id = $2)
-           order by decision_id, created_at desc''',
-        decision_ids, _uuid(account_id))
+           where decision_id = any($1::bigint[]) and audience = 'user' order by decision_id, created_at desc''',
+        decision_ids)
     return {r['decision_id']: dict(r) for r in rows}
-
-
-async def latest_relevant_decisions(account_id: str, symbols: list[str], limit: int = 200) -> list[dict]:
-    rows = await pool().fetch(
-        '''select * from risk_decisions
-           where run_id = '' and (account_id = $1 or (account_id is null and symbol = any($2::text[])))
-           order by id desc limit $3''',
-        _uuid(account_id), symbols, limit)
-    return [dict(row) for row in rows]
-
-
-async def daily_digest(account_id: str, brief_date: date) -> dict | None:
-    row = await pool().fetchrow(
-        '''select * from decision_explanations
-           where audience = 'digest' and account_id = $1 and brief_date = $2
-           order by created_at desc limit 1''',
-        _uuid(account_id), brief_date)
-    return dict(row) if row else None
-
-
-async def daily_digest_account_ids(brief_date: date) -> set[str]:
-    rows = await pool().fetch(
-        '''select account_id from decision_explanations
-           where audience = 'digest' and brief_date = $1 and account_id is not null''', brief_date)
-    return {str(row['account_id']) for row in rows}
-
-
-async def daily_ops_brief(brief_date: date) -> dict | None:
-    row = await pool().fetchrow(
-        '''select * from decision_explanations
-           where audience = 'ops' and brief_date = $1 order by created_at desc limit 1''', brief_date)
-    return dict(row) if row else None
 
 
 async def latest_ops_brief(since: datetime) -> dict | None:
@@ -577,3 +541,29 @@ async def list_replays(limit: int = 20) -> list[dict]:
     rows = await pool().fetch(
         'select run_id, session_date, summary, created_at from replay_runs order by created_at desc limit $1', limit)
     return [dict(r) for r in rows]
+
+
+# ============================================================================ wallet connections
+
+async def save_wallet_connection(account_id: str, wallet_address: str, chain_id: int) -> None:
+    await pool().execute(
+        '''insert into wallet_connections (account_id, wallet_address, chain_id)
+           values ($1, $2, $3)
+           on conflict (account_id, wallet_address, chain_id)
+           do update set last_synced = now()''',
+        _uuid(account_id), wallet_address.lower(), chain_id)
+
+
+async def get_wallet_connections(account_id: str) -> list[dict]:
+    rows = await pool().fetch(
+        '''select wallet_address, chain_id, label, connected_at, last_synced
+           from wallet_connections where account_id = $1 order by connected_at''',
+        _uuid(account_id))
+    return [dict(r) for r in rows]
+
+
+async def delete_wallet_connection(account_id: str, wallet_address: str, chain_id: int) -> None:
+    await pool().execute(
+        '''delete from wallet_connections
+           where account_id = $1 and wallet_address = $2 and chain_id = $3''',
+        _uuid(account_id), wallet_address.lower(), chain_id)

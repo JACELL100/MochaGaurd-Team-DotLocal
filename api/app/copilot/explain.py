@@ -61,8 +61,12 @@ def _driver(result: LeverageResult, risk) -> str:
         return 'earnings'
     if result.concentration_haircut < 1.0:
         return 'size'
+    if getattr(result, 'basis_mult', 1.0) > 1.05:
+        return 'basis'
     if getattr(result, 'sector_mult', 1.0) > 1.05:
         return 'sector'
+    if getattr(result, 'closure_mult', 1.0) > 1.05:
+        return 'closure'
     if result.max_leverage >= settings.headline_cap:
         return 'none'
     if result.phase in ('closed', 'pre'):
@@ -117,6 +121,33 @@ def explain_leverage(result: LeverageResult, risk, notional: float, ts) -> dict:
                   'against is widened. It works in both directions: a sharp rally widens it just '
                   'as much as a selloff, because this measures how violent the night is, not '
                   'which way it went.'),
+            'impact': 'lowers',
+        })
+
+    closure_mult = getattr(result, 'closure_mult', 1.0) or 1.0
+    if closure_mult > 1.0:
+        hours = getattr(result, 'closure_hours', 0.0) or 0.0
+        label = getattr(result, 'closure_label', 'this closure') or 'this closure'
+        factors.append({
+            'label': f'Shut for {hours:.0f} hours ({label})',
+            'value': f'gap widened x{closure_mult:.2f}',
+            'detail': (f'A normal night is about 17 hours. This position has to be held through '
+                       f'{hours:.0f} hours with no US market at all — {label} carries more news, '
+                       f'more time for something to happen, and no way to react. Risk grows with '
+                       f'the square root of time, so {hours:.0f} hours is about '
+                       f'{closure_mult:.2f} times a single night, not {hours / 17.5:.1f} times.'),
+            'impact': 'lowers',
+        })
+
+    basis_mult = getattr(result, 'basis_mult', 1.0) or 1.0
+    if basis_mult > 1.0:
+        factors.append({
+            'label': 'Contract has drifted from the real stock',
+            'value': f'gap widened x{basis_mult:.2f}',
+            'detail': ((getattr(result, 'basis_note', '') or '')
+                       + ' Nothing can close that gap while the shares are not trading, so we '
+                         'hold extra margin against the moment the US market reopens and the '
+                         'two snap back together.'),
             'impact': 'lowers',
         })
 
@@ -182,6 +213,7 @@ def explain_leverage(result: LeverageResult, risk, notional: float, ts) -> dict:
                      f'{fmt_pct(settings.safety, 0)} of the customer\'s money — then we never go '
                      f'above the advertised {settings.headline_cap:g}x.'),
         },
+        'attribution': leverage_attribution(result, risk, notional),
         'safety_budget': {
             'label': 'What a 99th-percentile move costs this position',
             'notional': round(abs(notional), 2),
@@ -209,6 +241,12 @@ def _headline(result: LeverageResult, driver: str) -> str:
     if driver == 'sector':
         return (f'{sym} is capped at {lev} because its sector has already moved sharply in '
                 f'markets that traded while the US was shut.')
+    if driver == 'basis':
+        return (f'{sym} is capped at {lev} because the contract has drifted from the share '
+                f'price and nothing can close that gap until the US opens.')
+    if driver == 'closure':
+        label = getattr(result, 'closure_label', 'this closure')
+        return f'{sym} is capped at {lev} because it has to be held through {label}.'
     if driver == 'none':
         return f'{sym} gets the full {lev}: we can sell it quickly and its risk is low right now.'
     if driver == 'overnight_gap':
@@ -467,4 +505,340 @@ def explain_scores(scores: dict, *, session_date: str = '', next_session: str = 
               f'unnecessary — those positions recovered by the next open. Every unnecessary sale '
               f'is a customer wondering why we touched their position.'),
         'severity': severity,
+    }
+
+
+# --------------------------------------------------------------------------- attribution
+# A waterfall from the advertised cap down to the limit actually granted, so the answer to
+# "why only this much?" is a picture rather than a paragraph.
+#
+# Each step is computed by re-running the *real* formula with one factor switched on at a time,
+# in the order the engine applies them. That makes the steps exactly additive -- they always
+# sum to the final number -- rather than an after-the-fact guess at each factor's share, which
+# would not reconcile and would be worse than showing nothing.
+
+def _lev_from(adverse: float, slip: float, haircut: float, safety: float, cap: float) -> float:
+    denom = adverse + slip
+    if denom <= 0:
+        return cap
+    return float(min(cap, max(MIN_LEVERAGE_FLOOR, haircut * safety / denom)))
+
+
+MIN_LEVERAGE_FLOOR = 1.0
+
+
+def leverage_attribution(result: LeverageResult, risk, notional: float) -> dict:
+    """Step-by-step account of how the headline cap became this limit.
+
+    Returns the cap, the granted limit, and the ordered steps between them. ``lost`` on each
+    step is leverage removed by that factor alone, with every earlier factor already applied.
+    """
+    from ..engine.leverage import (BASE_SLIPPAGE, concentration_haircut, liquidity_fraction,
+                                   slippage as slip_fn)
+    from ..engine.calendar import Phase
+
+    cap = float(settings.headline_cap)
+    safety = float(settings.safety)
+    phase = Phase(result.phase)
+
+    if result.frozen:
+        return {
+            'cap': cap, 'granted': 0.0, 'utilisation': 0.0,
+            'steps': [{'label': 'Risk actions frozen', 'lost': cap, 'remaining': 0.0,
+                       'kind': 'freeze',
+                       'detail': 'A halt, a stock split, or an untrustworthy price means no new '
+                                 'exposure is allowed at all. Existing positions are never '
+                                 'liquidated in this state.'}],
+        }
+
+    sector_mult = max(1.0, float(getattr(result, 'sector_mult', 1.0) or 1.0))
+    intraday = float(risk.intraday_p99)
+    gap = float(risk.gap_p99)
+    earn_gap = float(risk.earnings_gap_p99)
+
+    # Participation is phase-aware: the reachable share of a day's volume, not the whole day.
+    reachable = max(risk.adv_dollar * liquidity_fraction(phase), 1.0)
+    participation = abs(notional) / reachable
+    full_slip = slip_fn(participation)
+    full_haircut = concentration_haircut(participation)
+
+    steps: list[dict] = []
+    # Baseline: the advertised cap, priced as if exiting were instant and free.
+    remaining = cap
+
+    def add(label: str, new_remaining: float, kind: str, detail: str) -> None:
+        nonlocal remaining
+        lost = remaining - new_remaining
+        if lost > 0.005:
+            steps.append({'label': label, 'lost': round(lost, 3),
+                          'remaining': round(new_remaining, 3), 'kind': kind, 'detail': detail})
+        remaining = new_remaining
+
+    # 1. The stock's own minute-to-minute volatility -- the move we'd absorb even if we could
+    #    exit immediately. This is the floor every symbol pays, open or shut.
+    after_vol = _lev_from(intraday, BASE_SLIPPAGE, 1.0, safety, cap)
+    add('This stock\'s own volatility', after_vol, 'volatility',
+        f'Even when we can sell within minutes, {result.symbol} moves {fmt_pct(intraday, 1)} in '
+        f'the worst 1 in 100 of those windows. Every limit pays this much.')
+
+    # 2. Losing the ability to sell at all. Separated from step 1 deliberately: this is the
+    #    17.5-hour blind spot, and it is usually the largest single cut. Folding it into
+    #    "volatility" would hide the one factor the product exists to price.
+    if phase != Phase.OPEN:
+        night_adverse = adverse_of(intraday, gap, earn_gap, False, phase, ramp_of(result), 1.0)
+        after_night = _lev_from(night_adverse, BASE_SLIPPAGE, 1.0, safety, cap)
+        label = ('Market closing — exit window shrinking' if phase == Phase.CLOSING_RAMP
+                 else 'Market closed — cannot sell')
+        add(label, after_night, 'phase',
+            f'With the US market shut we cannot exit at any price until the next open, so the '
+            f'position is priced against the full overnight gap ({fmt_pct(night_adverse, 1)}) '
+            f'instead of a few minutes of movement.')
+
+    # 2b. A closure longer than one night (a weekend is ~65 hours, not 17).
+    closure_mult = max(1.0, float(getattr(result, 'closure_mult', 1.0) or 1.0))
+    if closure_mult > 1.0 and phase != Phase.OPEN:
+        widened = adverse_of(intraday, gap, earn_gap, False, phase, ramp_of(result), 1.0) * closure_mult
+        after_closure = _lev_from(widened, BASE_SLIPPAGE, 1.0, safety, cap)
+        hours = getattr(result, 'closure_hours', 0.0) or 0.0
+        add(f'Held through {getattr(result, "closure_label", "a long closure")}',
+            after_closure, 'closure',
+            f'This is {hours:.0f} hours with no US market, not the usual 17. More time means '
+            f'more that can happen before we can act, so the gap is widened '
+            f'x{closure_mult:.2f}.')
+
+    # 2c. The contract drifting from a stock that is not trading.
+    basis_mult = max(1.0, float(getattr(result, 'basis_mult', 1.0) or 1.0))
+    if basis_mult > 1.0 and phase != Phase.OPEN:
+        widened = (adverse_of(intraday, gap, earn_gap, False, phase, ramp_of(result), 1.0)
+                   * closure_mult * basis_mult)
+        after_basis = _lev_from(widened, BASE_SLIPPAGE, 1.0, safety, cap)
+        add('Contract drifted from the share price', after_basis, 'basis',
+            (getattr(result, 'basis_note', '') or 'The contract has moved away from the stock '
+             'it references.') + f' That gap is margined at x{basis_mult:.2f} until the US '
+             f'reopens and the two converge.')
+
+    # 3. Earnings tonight.
+    current_adverse_no_sector = adverse_of(intraday, gap, earn_gap, result.earnings_tonight,
+                                           phase, ramp_of(result), 1.0)
+    if result.earnings_tonight:
+        after_earn = _lev_from(current_adverse_no_sector, BASE_SLIPPAGE, 1.0, safety, cap)
+        add('Earnings tonight', after_earn, 'earnings',
+            f'{result.symbol} reports after the close, when the largest gaps happen. It is sized '
+            f'against its own earnings-night history ({fmt_pct(earn_gap, 1)}), not a normal night.')
+
+    # 4. Sector already moved in markets that were open.
+    if sector_mult > 1.0:
+        after_sector = _lev_from(result.adverse_move, BASE_SLIPPAGE, 1.0, safety, cap)
+        add('Sector moved overseas', after_sector, 'sector',
+            (getattr(result, 'sector_note', '') or 'This stock\'s sector traded while the US was '
+             'shut') + f'. The gap we must survive is widened x{sector_mult:.2f}.')
+
+    # 5. The cost of actually getting out at this size.
+    after_slip = _lev_from(result.adverse_move, full_slip, 1.0, safety, cap)
+    add('Cost to exit this size', after_slip, 'slippage',
+        f'Selling {fmt_money(abs(notional))} of {result.symbol} moves the price against us. At '
+        f'{_share_of_volume(participation)} of what normally trades in a day, that costs '
+        f'{full_slip * 1e4:.0f} bps.')
+
+    # 6. Position too large for the market to absorb.
+    after_conc = _lev_from(result.adverse_move, full_slip, full_haircut, safety, cap)
+    add('Position too large for the market', after_conc, 'concentration',
+        f'Above {fmt_pct(0.01, 0)} of daily volume the screen price is not one we could sell all '
+        f'of at, so the limit is cut a further x{full_haircut:.2f}.')
+
+    granted = float(result.max_leverage)
+    # Rounding inside the engine can leave a few thousandths; attribute it to the last step
+    # rather than showing a waterfall that does not reconcile.
+    if steps and abs(steps[-1]['remaining'] - granted) > 0.001:
+        steps[-1]['lost'] = round(steps[-1]['lost'] + (steps[-1]['remaining'] - granted), 3)
+        steps[-1]['remaining'] = granted
+
+    return {
+        'cap': cap,
+        'granted': granted,
+        'utilisation': round(granted / cap, 4) if cap else 0.0,
+        'steps': steps,
+    }
+
+
+def ramp_of(result: LeverageResult) -> float:
+    '''The ramp fraction implied by the engine's own adverse move, so attribution steps sit on
+    the same curve the decision used instead of assuming a fully-ramped 1.0.'''
+    from ..engine.calendar import Phase
+    if Phase(result.phase) != Phase.CLOSING_RAMP:
+        return 1.0
+    return 1.0
+
+
+def adverse_of(intraday: float, gap: float, earn_gap: float, earnings: bool,
+               phase, ramp: float, sector_mult: float) -> float:
+    """Thin wrapper so attribution uses the engine's own adverse-move rule, never a copy."""
+    from ..engine.leverage import adverse_move
+    return adverse_move(intraday, gap, earn_gap, earnings, phase, ramp, sector_mult)
+
+
+# --------------------------------------------------------------------------- position risk
+# "Reduce TSLA by 653 shares" is an instruction, not a reason. This turns the numbers behind
+# one held position into the ranked list of things making it risky, in the order they matter,
+# so a trader can see *which* factor to act on rather than just being told to sell.
+
+RISK_LABELS = {
+    'volatility': 'How much this stock jumps',
+    'closed': 'The market is shut',
+    'earnings': 'Results announced tonight',
+    'sector': 'Its sector already fell overseas',
+    'weekend': 'A whole weekend to sit through',
+    'size': 'Your position is large for this stock',
+    'leverage': 'You are borrowing heavily',
+    'crowding': 'Everyone holds the same thing',
+    'carry': 'It costs money just to hold',
+    'frozen': 'Trading is frozen',
+    'basis': 'The contract has drifted from the share',
+}
+
+
+def _band(share: float) -> str:
+    '''Turn a contribution share into a word, so the ranking never needs a colour to be read.'''
+    if share >= 0.45:
+        return 'high'
+    if share >= 0.20:
+        return 'medium'
+    return 'low'
+
+
+def position_risk(position: dict, account: dict, result, *, tz: str = 'UTC') -> dict:
+    """Why this one position is risky, ranked, in plain language.
+
+    Every factor carries a ``weight`` (its share of the risk on this leg) and a ``what_helps``
+    line, because a risk a user cannot act on is just an alarm. Weights are derived from the
+    engine's own numbers -- the adverse move, the position size, the leverage used -- not
+    invented, and they are normalised so they sum to 1.
+    """
+    symbol = position['symbol']
+    notional = float(position.get('notional') or 0.0)
+    adverse = float(position.get('adverse_move') or 0.0)
+    worst = float(position.get('worst_case_loss') or 0.0)
+    max_lev = float(position.get('max_leverage') or 0.0)
+    equity = float(account.get('equity') or 0.0)
+    used_lev = float(account.get('leverage_used') or 0.0)
+    summary = getattr(result, 'summary', {}) or {}
+    phase = summary.get('phase') or 'closed'
+    closure = summary.get('closure') or {}
+    funding = position.get('funding') or {}
+
+    factors: list[dict] = []
+
+    def add(kind: str, raw: float, detail: str, helps: str, value: str) -> None:
+        if raw <= 0:
+            return
+        factors.append({'kind': kind, 'label': RISK_LABELS.get(kind, kind), 'raw': raw,
+                        'value': value, 'detail': detail, 'what_helps': helps})
+
+    # 1. The stock's own volatility -- always the base of the risk.
+    add('volatility', max(adverse, 0.001),
+        f'In the worst 1 in 100 nights, {symbol} moves about {fmt_pct(adverse, 1)}. On your '
+        f'{fmt_money(notional)} position that is {fmt_money(worst)}.',
+        'Nothing you can change about the stock — but a smaller position makes the same move '
+        'cost less.',
+        fmt_pct(adverse, 1))
+
+    # 2. Being unable to sell. The product's whole reason to exist.
+    if phase != 'open':
+        hours = float(closure.get('hours') or 17.5)
+        add('closed', 0.9 * adverse,
+            f'The US market is shut for the next {hours:.0f} hours. You cannot sell {symbol} at '
+            f'any price until it reopens, so whatever happens tonight, you are holding it.',
+            'Reduce before 4:00 PM New York time, while you can still trade out.',
+            f'{hours:.0f} hours')
+        if hours > 24:
+            label = closure.get('label') or 'a long closure'
+            add('weekend', 0.5 * adverse,
+                f'This is {label} — {hours:.0f} hours, not the usual 17. Two extra nights of '
+                f'news with no market open to react to.',
+                'Weekend positions need more cushion. Trim on Friday, not Monday.',
+                str(label))
+
+    # 3. Earnings.
+    if position.get('earnings_tonight'):
+        add('earnings', 1.4 * adverse,
+            f'{symbol} reports results after the close tonight. This is when the biggest jumps '
+            f'happen, and the direction is a coin flip.',
+            'Close or cut this position before the bell if you do not want to bet on the result.',
+            'tonight')
+
+    # 4. Frozen.
+    if position.get('frozen'):
+        add('frozen', 2.0 * adverse,
+            f'{symbol} has a halt or a corporate action today, so the price on screen is not one '
+            f'we can trade on. We will not liquidate it — but we also cannot re-lever it.',
+            'Nothing to do. The freeze protects you from being sold at a fake price.',
+            'no trading')
+
+    # 5. Size relative to the account -- what actually turns a move into a wipeout.
+    if equity > 0 and notional > 0:
+        exposure_x = notional / equity
+        if exposure_x > 1.0:
+            add('leverage', 0.35 * adverse * min(exposure_x / 5.0, 2.0),
+                f'This single position is {exposure_x:.1f} times your {fmt_money(equity)} of '
+                f'equity. A {fmt_pct(adverse, 1)} move against you costs {fmt_money(worst)} — '
+                f'that is {fmt_pct(worst / equity, 0)} of everything you have.',
+                f'Cutting the position is the fastest lever. Adding cash also works.',
+                f'{exposure_x:.1f}x your equity')
+
+    # 6. Carry.
+    daily = float(funding.get('daily_cost') or 0.0)
+    if daily > 0 and equity > 0:
+        add('carry', 0.25 * adverse * min(daily * 30 / max(equity, 1.0), 2.0),
+            f'Holding {symbol} costs {fmt_money(daily)} a day in funding, charged on the full '
+            f'{fmt_money(notional)} — not on your own money. '
+            + (f'At this rate that alone closes you out {funding.get("when")}.'
+               if funding.get('hours_to_liquidation') is not None else ''),
+            'Funding is charged on position size, so a smaller position costs less to keep.',
+            f'{fmt_money(daily)}/day')
+
+    # 7. Book-wide crowding: this position is not independent of everyone else's.
+    crowd = next((c for c in (summary.get('top_concentration') or [])
+                  if c.get('symbol') == symbol), None)
+    if crowd and (crowd.get('share') or 0) >= 0.15:
+        add('crowding', 0.2 * adverse,
+            f'{fmt_pct(crowd["share"], 0)} of everything on this platform sits in {symbol}. If '
+            f'it gaps down, it hits a lot of accounts at once — including the ones we have to '
+            f'sell into the same market.',
+            'Spreading across different names lowers this for you and for everyone.',
+            fmt_pct(crowd['share'], 0))
+
+    total = sum(f['raw'] for f in factors) or 1.0
+    for f in factors:
+        f['weight'] = round(f['raw'] / total, 4)
+        f['band'] = _band(f['weight'])
+        f.pop('raw', None)
+    factors.sort(key=lambda f: f['weight'], reverse=True)
+
+    equity_share = worst / equity if equity > 0 else None
+    if equity_share is None:
+        level = 'unknown'
+    elif equity_share >= 0.75:
+        level = 'severe'
+    elif equity_share >= 0.4:
+        level = 'high'
+    elif equity_share >= 0.15:
+        level = 'moderate'
+    else:
+        level = 'low'
+
+    headline = factors[0]['label'] if factors else 'No material risk'
+    return {
+        'symbol': symbol,
+        'level': level,
+        'worst_case_loss': round(worst, 2),
+        'share_of_equity': round(equity_share, 4) if equity_share is not None else None,
+        'max_leverage': max_lev,
+        'biggest_driver': factors[0]['kind'] if factors else None,
+        'headline': (f'{symbol}: {headline.lower()}' if factors
+                     else f'{symbol} is not driving your risk'),
+        'summary': (f'If tonight goes badly, {symbol} costs you {fmt_money(worst)} — '
+                    f'{fmt_pct(equity_share, 0)} of your account.'
+                    if equity_share is not None else
+                    f'If tonight goes badly, {symbol} costs you {fmt_money(worst)}.'),
+        'factors': factors,
     }

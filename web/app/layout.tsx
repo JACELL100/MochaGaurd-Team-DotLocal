@@ -4,6 +4,8 @@ import { Geist, Geist_Mono } from "next/font/google";
 import { Header } from "@/components/layout/Header";
 import { currentViewer } from "@/lib/supabase/server";
 import { Footer } from "@/components/layout/Footer";
+import { Web3Provider } from "@/components/Web3Provider";
+import { CopilotChat } from "@/components/CopilotChat";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -30,9 +32,12 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased dark`}
     >
       <body className="min-h-full flex flex-col bg-[#05050A] text-[#F8FAFC]">
-        <Header viewer={viewer} />
-        <main className="flex-1 w-full pt-16">{children}</main>
-        <Footer />
+        <Web3Provider>
+          <Header viewer={viewer} />
+          <main className="flex-1 w-full pt-16">{children}</main>
+          <Footer />
+          <CopilotChat />
+        </Web3Provider>
       </body>
     </html>
   );

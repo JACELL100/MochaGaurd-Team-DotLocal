@@ -1,10 +1,11 @@
-{%- if f.status == 'safe' -%}
-You are safe tonight.
-Even if every position gaps to its {{ f.risk_percentile }} worst case, your equity stays positive (worst-case loss {{ f.worst_case_pct }} of equity). {% if f.earnings_symbols != 'none' %}{{ f.earnings_symbols }} report before the next market open; your sizing already covers it. {% endif %}{% if f.frozen_symbols != 'none' %}{{ f.frozen_symbols }} is frozen for a corporate action and will not be touched. {% endif %}No action required. Sleep well.
+{#- The body only. The headline is set by the caller, so repeating it here would render
+    the same sentence twice: once as the banner title and once as its first line. -#}
+{%- if f.status == 'safe' and f.has_positions == 'no' -%}
+You are not holding anything overnight, so there is nothing at risk tonight and nothing to do.
+{%- elif f.status == 'safe' -%}
+Nothing needs doing before the close. If every position you hold gapped to the worst overnight move we have on record, you would lose {{ f.worst_case_loss }} — {{ f.worst_case_pct }} of your {{ f.equity }} — and your account would still be above zero. {% if f.earnings_symbols != 'none' %}{{ f.earnings_symbols }} reports tonight, and your position size already allows for that. {% endif %}{% if f.frozen_symbols != 'none' %}{{ f.frozen_symbols }} is frozen for a corporate action and will not be touched. {% endif %}That is the 1-in-100 case, not a guarantee: a worse gap than anything in the record is always possible, which is why the limits are where they are.
 {%- elif f.status == 'auto_derisk' -%}
-We are stepping in to protect your account.
-Your equity ({{ f.equity }}) is exhausted against {{ f.gross_exposure }} of exposure. Positions will be closed at {{ f.derisk_et }} ({{ f.derisk_local }} your time) with impact-limited orders. Every decision is logged and anchored on-chain so you can verify it later.
+Your equity ({{ f.equity }}) can no longer support {{ f.gross_exposure }} of exposure. Positions will be closed at {{ f.derisk_et }} ({{ f.derisk_local }} your time), worst-affected first, in slices small enough not to move the price against you. Every decision is logged and anchored on-chain so you can check it afterwards.
 {%- else -%}
-Action needed before {{ f.deadline_local }}.
-{{ f.n_actions }} position(s) exceed tonight's overnight leverage limit: {{ f.flagged_symbols }}. Reduce them yourself before {{ f.deadline_et }} ({{ f.deadline_local }} your time), or the engine will trim exactly the amount required at {{ f.derisk_et }} ({{ f.derisk_local }}). Nothing more than necessary is ever sold.
+{{ f.n_actions }} position(s) are above tonight's leverage limit: {{ f.flagged_symbols }}. Reduce them yourself before {{ f.deadline_et }} ({{ f.deadline_local }} your time), or the engine trims exactly the amount required at {{ f.derisk_et }} ({{ f.derisk_local }}) — never more than necessary. Worst-case loss tonight is {{ f.worst_case_loss }}, {{ f.worst_case_pct }} of your equity.
 {%- endif -%}

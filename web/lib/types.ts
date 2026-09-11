@@ -57,7 +57,6 @@ export interface BookSummary {
 export interface BookResponse {
   summary: BookSummary;
   ops_brief: string | null;
-  ops_brief_model?: string;
   plain?: PlainBook;
   decisions: Decision[];
 }
@@ -67,10 +66,28 @@ export interface PositionRow {
   qty: number;
   price: number;
   notional: number;
+  /**
+   * Cost basis. Null when the broker did not supply one — P&L is then unavailable, not zero.
+   *
+   * These enrichment fields are optional because callers that construct a position by hand
+   * (the stress-test simulator builds hypothetical books) legitimately have no cost basis or
+   * carry to report. Components render "–" for a missing value rather than a misleading zero.
+   */
+  avg_price?: number | null;
+  unrealised_pnl?: number | null;
+  unrealised_pct?: number | null;
+  /** Move vs the last official daily close. */
+  day_change?: number | null;
+  /** Equity this leg alone ties up at its own allowed leverage. */
+  margin_required?: number | null;
+  /** What this leg loses if it gaps to its 99th-percentile adverse move. */
+  worst_case_loss?: number;
   max_leverage: number;
   adverse_move: number;
   earnings_tonight: boolean;
   frozen: boolean;
+  funding?: FundingRow;
+  risk?: PositionRisk;
 }
 
 export interface AccountView {
@@ -109,14 +126,6 @@ export interface Explanation {
   model: string;
 }
 
-export interface OpsBrief {
-  date: string;
-  as_of: string;
-  headline: string;
-  body: string;
-  model: string;
-}
-
 export interface TonightBriefing {
   account: AccountView;
   status: TonightStatus;
@@ -129,6 +138,10 @@ export interface TonightBriefing {
   cards: Explanation[];
   decisions: Decision[];
   model: string;
+  funding?: FundingRow[];
+  funding_book?: FundingBook;
+  closure?: ClosureWindow;
+  risk?: PositionRisk[];
 }
 
 export interface ReplayPoint {
@@ -249,6 +262,8 @@ export interface LeverageExplanation {
     result: number;
     note: string;
   };
+  /** Waterfall from the advertised cap down to the limit granted. Steps always reconcile. */
+  attribution: LeverageAttribution;
   safety_budget: {
     label: string;
     notional: number;
@@ -340,6 +355,24 @@ export interface SessionReplay {
 }
 
 
+export interface AttributionStep {
+  label: string;
+  /** Leverage removed by this factor alone, with every earlier factor already applied. */
+  lost: number;
+  /** Leverage still available after this factor. */
+  remaining: number;
+  kind: "volatility" | "phase" | "earnings" | "sector" | "slippage" | "concentration" | "freeze";
+  detail: string;
+}
+
+export interface LeverageAttribution {
+  cap: number;
+  granted: number;
+  /** granted / cap — the share of the advertised maximum this request earns. */
+  utilisation: number;
+  steps: AttributionStep[];
+}
+
 /** Plain-language reason attached to a decision. Computed, never generated. */
 export interface PlainReason {
   headline: string;
@@ -371,4 +404,107 @@ export interface PlainProof {
   headline: string;
   why: string;
   severity: "ok" | "info" | "warning" | "critical";
+}
+
+
+/** One bar on the desk chart: a real print plus the limit the engine allowed at that moment. */
+export interface DeskPoint {
+  ts: string;
+  price: number;
+  max_leverage: number;
+  phase: Phase;
+  frozen: boolean;
+}
+
+export interface DeskSeries {
+  symbol: string;
+  points: DeskPoint[];
+  qty: number;
+  notional: number;
+  price: number;
+  avg_price: number | null;
+  unrealised_pnl: number | null;
+  unrealised_pct: number | null;
+  max_leverage: number;
+  adverse_move: number;
+  earnings_tonight: boolean;
+  frozen: boolean;
+  window_change: number;
+  window_low: number;
+  window_high: number;
+  leverage_low: number;
+  leverage_high: number;
+}
+
+export interface DeskResponse {
+  account_id: string;
+  as_of: string;
+  phase: Phase;
+  headline_cap: number;
+  hours: number;
+  series: DeskSeries[];
+}
+
+
+/** Perp carry for one position: what it costs to hold, and when carry alone becomes fatal. */
+export interface FundingRow {
+  symbol: string;
+  side: "long" | "short";
+  hourly_rate: number;
+  hourly_cost: number;
+  daily_cost: number;
+  cost_to_next_open: number;
+  hours_to_next_open: number;
+  /** Null when carry is neutral or being earned — there is no deadline to warn about. */
+  hours_to_liquidation: number | null;
+  liquidation_at: string | null;
+  /** "in 10 hours" / "in 2.1 days" / "not at this rate". */
+  when: string;
+  daily_share_of_buffer: number | null;
+  /** True when the trader pays funding, false when they receive it. */
+  pays: boolean;
+  plain: PlainProof;
+}
+
+export interface FundingBook {
+  daily_paid: number;
+  daily_earned: number;
+  daily_net: number;
+  positions_paying: number;
+  positions_earning: number;
+  soonest_symbol: string | null;
+  soonest_hours: number | null;
+}
+
+/** How long the US market stays shut from now — 17.5 hours overnight, ~65 over a weekend. */
+export interface ClosureWindow {
+  hours: number;
+  label: string;
+  multiplier: number;
+}
+
+
+/** One thing making a position risky, with its share of that position's risk. */
+export interface RiskFactor {
+  kind: string;
+  label: string;
+  /** Share of this position's risk, 0-1. Factors on a position sum to 1. */
+  weight: number;
+  band: "high" | "medium" | "low";
+  value: string;
+  detail: string;
+  /** What the trader can actually do about it. */
+  what_helps: string;
+}
+
+export interface PositionRisk {
+  symbol: string;
+  level: "severe" | "high" | "moderate" | "low" | "unknown";
+  worst_case_loss: number;
+  share_of_equity: number | null;
+  max_leverage: number;
+  biggest_driver: string | null;
+  headline: string;
+  summary: string;
+  factors: RiskFactor[];
 }
