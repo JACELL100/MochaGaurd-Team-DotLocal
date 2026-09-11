@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     funding_hourly_default: float = 0.000012
     funding_feed_enabled: bool = False
 
+    # --- crypto wallet integration
+    alchemy_api_key: str = ''
+    coingecko_api_key: str = ''
+
     # --- service
     internal_api_key: str = ''            # server-to-server secret for /internal/accounts/sync only
     scheduler_enabled: bool = True

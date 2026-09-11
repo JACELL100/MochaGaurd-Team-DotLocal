@@ -541,3 +541,29 @@ async def list_replays(limit: int = 20) -> list[dict]:
     rows = await pool().fetch(
         'select run_id, session_date, summary, created_at from replay_runs order by created_at desc limit $1', limit)
     return [dict(r) for r in rows]
+
+
+# ============================================================================ wallet connections
+
+async def save_wallet_connection(account_id: str, wallet_address: str, chain_id: int) -> None:
+    await pool().execute(
+        '''insert into wallet_connections (account_id, wallet_address, chain_id)
+           values ($1, $2, $3)
+           on conflict (account_id, wallet_address, chain_id)
+           do update set last_synced = now()''',
+        _uuid(account_id), wallet_address.lower(), chain_id)
+
+
+async def get_wallet_connections(account_id: str) -> list[dict]:
+    rows = await pool().fetch(
+        '''select wallet_address, chain_id, label, connected_at, last_synced
+           from wallet_connections where account_id = $1 order by connected_at''',
+        _uuid(account_id))
+    return [dict(r) for r in rows]
+
+
+async def delete_wallet_connection(account_id: str, wallet_address: str, chain_id: int) -> None:
+    await pool().execute(
+        '''delete from wallet_connections
+           where account_id = $1 and wallet_address = $2 and chain_id = $3''',
+        _uuid(account_id), wallet_address.lower(), chain_id)

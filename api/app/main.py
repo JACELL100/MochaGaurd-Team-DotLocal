@@ -34,6 +34,7 @@ from .engine import calendar as cal
 from .engine import funding as funding_engine
 from .engine import leverage as leverage_engine
 from .engine import replay as replay_engine
+from .wallet import fetch_wallet_data, CHAIN_NAMES as WALLET_CHAIN_NAMES
 
 log = logging.getLogger('mochaguard.api')
 
@@ -56,6 +57,30 @@ class AccountSyncInput(BaseModel):
     tz: str = 'UTC'
     cash: float = Field(allow_inf_nan=False)
     positions: list[PositionInput]
+
+
+class WalletConnectInput(BaseModel):
+    wallet_address: str = Field(min_length=42, max_length=42,
+                                description='EVM address (0x-prefixed, 42 chars)')
+    chain_id: int = Field(default=1, description='EVM chain ID (1=Ethereum, 137=Polygon, etc.)')
+
+    @field_validator('wallet_address')
+    @classmethod
+    def normalize_address(cls, v: str) -> str:
+        v = v.strip()
+        if not v.startswith('0x'):
+            raise ValueError('wallet_address must start with 0x')
+        return v.lower()
+
+
+class WalletDisconnectInput(BaseModel):
+    wallet_address: str = Field(min_length=42, max_length=42)
+    chain_id: int = Field(default=1)
+
+    @field_validator('wallet_address')
+    @classmethod
+    def normalize_address(cls, v: str) -> str:
+        return v.strip().lower()
 
 
 class LeverageInput(BaseModel):
@@ -802,3 +827,106 @@ async def sync_account(input: AccountSyncInput, request: Request, x_internal_key
     await db.replace_positions(str(account['id']), [position.model_dump() for position in input.positions])
     await service_of(request).reload_book()
     return {'account_id': str(account['id']), 'positions_synced': len(input.positions)}
+
+
+# ─────────────────────────────────────────────────────── wallet integration ──
+
+@app.post('/wallet/connect')
+async def wallet_connect(
+    input: WalletConnectInput,
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+):
+    """Connect a real EVM wallet: fetch on-chain balances via Alchemy, price via CoinGecko,
+    compute risk parameters, and push everything into the user's account in one shot."""
+    if not settings.alchemy_api_key or not settings.coingecko_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='Wallet integration is not configured on this server (missing ALCHEMY_API_KEY or COINGECKO_API_KEY)',
+        )
+
+    service    = service_of(request)
+    account    = await service.account_for(principal)
+    account_id = str(account['id'])
+
+    try:
+        wallet_data = await fetch_wallet_data(
+            input.wallet_address,
+            input.chain_id,
+            settings.alchemy_api_key,
+            settings.coingecko_api_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:
+        log.error('Wallet fetch failed for %s: %s', input.wallet_address, exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f'Failed to fetch wallet data: {exc}',
+        )
+
+    # ── Persist everything through the existing DB layer ─────────────────────
+    if wallet_data['symbols_to_upsert']:
+        await db.upsert_symbols(wallet_data['symbols_to_upsert'])
+
+    for symbol, bars in wallet_data['daily_bars'].items():
+        await db.upsert_bars_daily(symbol, bars)
+
+    for symbol, bars in wallet_data['intraday_bars'].items():
+        await db.upsert_bars_intraday(symbol, bars, source='coingecko')
+
+    if wallet_data['risk_rows']:
+        await db.upsert_symbol_risk(wallet_data['risk_rows'])
+
+    positions_for_db = [
+        {'symbol': p['symbol'], 'qty': p['qty'], 'avg_price': p.get('avg_price')}
+        for p in wallet_data['positions']
+    ]
+    await db.replace_positions(account_id, positions_for_db)
+    await db.update_account(account_id, cash=wallet_data['cash_usd'])
+    await db.save_wallet_connection(account_id, input.wallet_address, input.chain_id)
+
+    # Reload book so the risk engine immediately evaluates the new positions
+    await service.reload_book()
+
+    return {
+        'account_id':       account_id,
+        'positions_synced': len(positions_for_db),
+        **wallet_data['summary'],
+    }
+
+
+@app.get('/wallet/connections')
+async def wallet_connections(
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+):
+    """List all wallets the current user has connected."""
+    service    = service_of(request)
+    account    = await service.account_for(principal)
+    account_id = str(account['id'])
+    rows = await db.get_wallet_connections(account_id)
+    # Serialize datetimes for JSON
+    return [
+        {
+            **r,
+            'connected_at': r['connected_at'].isoformat() if r.get('connected_at') else None,
+            'last_synced':  r['last_synced'].isoformat()  if r.get('last_synced')  else None,
+            'chain_name':   WALLET_CHAIN_NAMES.get(r['chain_id'], f"chain-{r['chain_id']}"),
+        }
+        for r in rows
+    ]
+
+
+@app.post('/wallet/disconnect')
+async def wallet_disconnect(
+    input: WalletDisconnectInput,
+    request: Request,
+    principal: Annotated[Principal, Depends(get_principal)],
+):
+    """Disconnect a wallet. Does NOT wipe positions — call /wallet/connect on another wallet to replace them."""
+    service    = service_of(request)
+    account    = await service.account_for(principal)
+    account_id = str(account['id'])
+    await db.delete_wallet_connection(account_id, input.wallet_address, input.chain_id)
+    return {'ok': True, 'wallet_address': input.wallet_address, 'chain_id': input.chain_id}

@@ -228,3 +228,19 @@ begin
     execute format('alter table %I enable row level security', t);
   end loop;
 end $$;
+
+-- Wallet integration
+alter table symbols add column if not exists chain text;
+alter table symbols add column if not exists contract_address text;
+
+create table if not exists wallet_connections (
+  id             bigserial primary key,
+  account_id     uuid not null references accounts on delete cascade,
+  wallet_address text not null,
+  chain_id       int not null default 1,
+  label          text,
+  connected_at   timestamptz not null default now(),
+  last_synced    timestamptz,
+  unique (account_id, wallet_address, chain_id)
+);
+alter table wallet_connections enable row level security;

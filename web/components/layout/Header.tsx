@@ -37,6 +37,7 @@ export function Header({ viewer = null }: { viewer?: Viewer | null }) {
     { name: "Stress Test", href: "/stress-test" },
     { name: "Why This Limit", href: "/simulate" },
     { name: "Score", href: "/score" },
+    { name: "My Wallet", href: "/wallet" },
   ];
 
   return (

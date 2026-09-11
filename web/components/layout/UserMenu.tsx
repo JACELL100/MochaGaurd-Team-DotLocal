@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { LogOut, Moon, User } from "lucide-react";
+import { LogOut, Moon, User, Wallet } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/browser";
 import type { Viewer } from "@/lib/supabase/server";
@@ -175,6 +175,15 @@ export function UserMenu({
           >
             <User className="h-3.5 w-3.5 text-[#A78BFA]" />
             Leverage simulator
+          </Link>
+          <Link
+            href="/wallet"
+            role="menuitem"
+            onClick={() => setOpen(false)}
+            className="flex items-center gap-2.5 px-4 py-2.5 text-xs text-[#CBD5E1] transition-colors hover:bg-[#121024]"
+          >
+            <Wallet className="h-3.5 w-3.5 text-[#A78BFA]" />
+            My crypto wallet
           </Link>
           <button
             type="button"
