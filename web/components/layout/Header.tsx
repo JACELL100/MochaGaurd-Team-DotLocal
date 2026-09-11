@@ -34,6 +34,7 @@ export function Header({ viewer = null }: { viewer?: Viewer | null }) {
   const navLinks = [
     { name: "Live Book", href: "/#console" },
     { name: "Trading Desk", href: "/tonight" },
+    { name: "Stress Test", href: "/stress-test" },
     { name: "Why This Limit", href: "/simulate" },
     { name: "Score", href: "/score" },
   ];
