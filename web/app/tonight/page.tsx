@@ -21,6 +21,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 
 
 import { Zap, ArrowRight, ShieldCheck, ShieldAlert, AlertTriangle } from "lucide-react";
+import { AlertLauncher } from "./AlertLauncher";
 
 export const metadata = { title: "Tonight" };
 
@@ -128,24 +129,34 @@ function Briefing({ b }: { b: TonightBriefing }) {
         <Stat label="Deadline" value={b.deadline_local} hint={b.deadline_et} tone="accent" />
       </div>
 
-      {/* Stress Test Shock Launcher Card */}
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-4 rounded-2xl border border-[#7C3AED]/40 bg-gradient-to-r from-[#121024] via-[#1A1636] to-[#0B0A14] p-5 shadow-[0_0_30px_rgba(124,58,237,0.15)]">
-        <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#7C3AED]/20 border border-[#7C3AED]/40 text-[#A78BFA]">
-            <Zap className="w-5 h-5" />
+      {/* Interactive Sentinel & Simulator Action Deck */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Stress Test Shock Launcher Card */}
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-4 rounded-2xl border border-[#7C3AED]/40 bg-gradient-to-r from-[#121024] via-[#1A1636] to-[#0B0A14] p-5 shadow-[0_0_30px_rgba(124,58,237,0.15)]">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#7C3AED]/20 border border-[#7C3AED]/40 text-[#A78BFA]">
+              <Zap className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="text-sm font-bold text-white tracking-tight">Simulate Overnight Shocks</div>
+              <div className="text-xs text-[#94A3B8]">Test market gap crashes (-5% to -35%) in real time.</div>
+            </div>
           </div>
-          <div>
-            <div className="text-sm font-bold text-white tracking-tight">Simulate Overnight Shocks</div>
-            <div className="text-xs text-[#94A3B8]">Test market gap crashes (-5% to -35%) against this portfolio in real time.</div>
-          </div>
+          <Link
+            href={`/stress-test?account=${a.account_id}`}
+            className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-[#7C3AED] to-[#6D28D9] hover:brightness-110 shadow-[0_0_20px_rgba(124,58,237,0.4)] flex items-center gap-2 shrink-0 transition-all"
+          >
+            Launch Stress Test
+            <ArrowRight className="w-3.5 h-3.5" />
+          </Link>
         </div>
-        <Link
-          href={`/stress-test?account=${a.account_id}`}
-          className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-[#7C3AED] to-[#6D28D9] hover:brightness-110 shadow-[0_0_20px_rgba(124,58,237,0.4)] flex items-center gap-2 shrink-0 transition-all"
-        >
-          Launch Stress Test
-          <ArrowRight className="w-3.5 h-3.5" />
-        </Link>
+
+        {/* Telegram & Siren Push Alerts Card */}
+        <AlertLauncher
+          accountId={a.account_id}
+          accountName={a.display_name ?? a.account_id}
+          symbol={a.positions[0]?.symbol ?? "NVDA"}
+        />
       </div>
 
       {actionable.length > 0 && (

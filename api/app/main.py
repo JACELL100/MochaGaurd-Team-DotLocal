@@ -33,6 +33,7 @@ from .data.yfinance import YFinance, YFinanceError
 from .engine import calendar as cal
 from .engine import leverage as leverage_engine
 from .engine import replay as replay_engine
+from .notifications import telegram as telegram_notifier
 
 log = logging.getLogger('mochaguard.api')
 
@@ -757,3 +758,123 @@ async def sync_account(input: AccountSyncInput, request: Request, x_internal_key
     await db.replace_positions(str(account['id']), [position.model_dump() for position in input.positions])
     await service_of(request).reload_book()
     return {'account_id': str(account['id']), 'positions_synced': len(input.positions)}
+
+
+class TelegramTestInput(BaseModel):
+    chat_id: str | None = None
+    bot_token: str | None = None
+    account_name: str = 'Sample Trader (demo-trader-01)'
+    symbol: str = 'NVDA'
+
+
+class TelegramDispatchInput(BaseModel):
+    account_id: str
+    chat_id: str | None = None
+    bot_token: str | None = None
+
+
+@app.post('/alerts/telegram/test')
+async def telegram_test_alert(input: TelegramTestInput):
+    """Test Telegram bot connection and dispatch a simulated or live alert."""
+    msg, buttons = telegram_notifier.format_sleep_safe_alert(
+        account_name=input.account_name,
+        action='reduce exposure',
+        symbol=input.symbol,
+        deadline_et='15:45 ET',
+        deadline_local='01:15 AM',
+        required_cash=1250.0,
+        shares_to_trim=15,
+        web_url=settings.cors_origins.split(',')[0],
+    )
+    result = await telegram_notifier.send_telegram_message(
+        chat_id=input.chat_id,
+        text=msg,
+        bot_token=input.bot_token,
+        buttons=buttons,
+    )
+    return {'result': result, 'preview_message': msg}
+
+
+@app.post('/alerts/telegram/dispatch')
+async def telegram_dispatch_account(input: TelegramDispatchInput, request: Request):
+    """Dispatch an actionable 2 AM risk alert for a specific account."""
+    service = service_of(request)
+    account = await db.get_account(input.account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail='Account not found')
+    book = service.require_book()
+    result = await service.current_result()
+    view = book.account_view(input.account_id, result)
+    actions = [d for d in result.decisions if d.account_id == input.account_id]
+    worst = next((d for d in actions if d.action in {'reduce', 'close', 'margin_call'}), None)
+    symbol = worst.symbol if worst else (view['positions'][0]['symbol'] if view.get('positions') else 'NVDA')
+    action_type = worst.action if worst else 'maintain margin buffer'
+    shares_count = int(worst.qty_to_reduce or 15) if worst else 0
+    cash_needed = float(max(0, view.get('margin_required', 0) - view.get('equity', 0)))
+
+    msg, buttons = telegram_notifier.format_sleep_safe_alert(
+        account_name=view.get('display_name') or account.get('email') or input.account_id,
+        action=action_type,
+        symbol=symbol,
+        deadline_et='15:45 ET',
+        deadline_local='01:15 AM',
+        required_cash=cash_needed or 1200.0,
+        shares_to_trim=shares_count or 10,
+        web_url=settings.cors_origins.split(',')[0],
+    )
+    res = await telegram_notifier.send_telegram_message(
+        chat_id=input.chat_id,
+        text=msg,
+        bot_token=input.bot_token,
+        buttons=buttons,
+    )
+    return {'result': res, 'account_id': input.account_id, 'preview_message': msg}
+
+
+class TelegramBroadcastInput(BaseModel):
+    bot_token: str | None = None
+    account_name: str = 'All Accounts'
+    symbol: str = 'NVDA'
+    custom_message: str | None = None
+    chat_ids: list[str] | None = None
+
+
+@app.get('/alerts/telegram/subscribers')
+async def telegram_subscribers(bot_token: str | None = None):
+    """Retrieve discovered users/chats that have started the bot."""
+    subs = await telegram_notifier.get_bot_subscribers(bot_token)
+    return {'subscribers': subs, 'count': len(subs)}
+
+
+@app.post('/alerts/telegram/broadcast')
+async def telegram_broadcast_all(input: TelegramBroadcastInput):
+    """Broadcast an overnight risk sentinel alert to all subscribers."""
+    if input.custom_message:
+        msg = input.custom_message
+        buttons = [
+            [
+                {'text': '📊 View Tonight Briefing', 'url': f"{settings.cors_origins.split(',')[0]}/tonight"},
+                {'text': '⚡ Simulate Gap Shock', 'url': f"{settings.cors_origins.split(',')[0]}/stress-test"},
+            ]
+        ]
+    else:
+        msg, buttons = telegram_notifier.format_sleep_safe_alert(
+            account_name=input.account_name,
+            action='Overnight Risk Warning',
+            symbol=input.symbol,
+            deadline_et='15:45 ET',
+            deadline_local='01:15 AM',
+            required_cash=1250.0,
+            shares_to_trim=15,
+            web_url=settings.cors_origins.split(',')[0],
+        )
+
+    res = await telegram_notifier.broadcast_sleep_safe_alert(
+        text=msg,
+        buttons=buttons,
+        bot_token=input.bot_token,
+        chat_ids=input.chat_ids,
+    )
+    return {'broadcast': res, 'preview_message': msg}
+
+
