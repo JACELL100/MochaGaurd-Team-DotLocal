@@ -143,14 +143,23 @@ export function StressTestSimulator({
 
   // Handle switching account
   const handleSwitchAccount = (acctId: string) => {
+    setSelectedAccountModal(false);
     const found = allPortfolios[acctId];
     if (found) {
       setCurrentAccount(found);
       setPositions(found.positions || []);
       setEquity(found.equity);
       setEquityInput(String(found.equity));
+      if (typeof window !== "undefined") {
+        const url = new URL(window.location.href);
+        url.searchParams.set("account", acctId);
+        window.history.pushState({}, "", url.toString());
+      }
+    } else {
+      if (typeof window !== "undefined") {
+        window.location.href = `/stress-test?account=${encodeURIComponent(acctId)}`;
+      }
     }
-    setSelectedAccountModal(false);
   };
 
   // Pre-fill stock details when user selects from dropdown

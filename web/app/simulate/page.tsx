@@ -51,7 +51,7 @@ export default async function SimulatePage({ searchParams }: { searchParams: Pro
                 { label: "allowed", value: r.frozen ? "0x" : lev(r.max_leverage), tone: "accent" },
                 {
                   label: "of cap",
-                  value: r.explanation
+                  value: r.explanation?.attribution?.utilisation != null
                     ? `${(r.explanation.attribution.utilisation * 100).toFixed(0)}%`
                     : "–",
                 },
@@ -137,7 +137,7 @@ export default async function SimulatePage({ searchParams }: { searchParams: Pro
                 <div className={`tabular mt-2 text-6xl font-extrabold tracking-tight ${r.frozen ? "text-amber-400" : "text-white"}`}>
                   {r.frozen ? "Frozen" : lev(r.max_leverage)}
                 </div>
-                {r.explanation && (
+                {r.explanation?.attribution && (
                   <div className="mt-1.5 text-sm text-[#94A3B8]">
                     <span className="font-mono font-semibold text-[#C4B5FD]">
                       {(r.explanation.attribution.utilisation * 100).toFixed(0)}%
@@ -166,7 +166,7 @@ export default async function SimulatePage({ searchParams }: { searchParams: Pro
             </div>
           </GlowingCard>
 
-          {r.explanation && <LeverageWaterfall attribution={r.explanation.attribution} />}
+          {r.explanation?.attribution && <LeverageWaterfall attribution={r.explanation.attribution} />}
 
           {r.sector && r.sector.peers.length > 0 && (
             <GlowingCard>
