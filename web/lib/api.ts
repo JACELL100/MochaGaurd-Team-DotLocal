@@ -18,7 +18,10 @@ import type {
 } from "./types";
 
 const BASE = (process.env.FASTAPI_URL ?? "http://localhost:8000").replace(/\/$/, "");
-const TIMEOUT_MS = Number(process.env.FASTAPI_TIMEOUT_MS ?? 4000);
+// Fast endpoints (book, accounts, leverage, tonight): default 15 s.
+// Heavy compute endpoints (replay, session replay): separate 90 s budget.
+const TIMEOUT_MS = Number(process.env.FASTAPI_TIMEOUT_MS ?? 15_000);
+const REPLAY_TIMEOUT_MS = Number(process.env.FASTAPI_REPLAY_TIMEOUT_MS ?? 90_000);
 
 export class ApiError extends Error {
   constructor(
@@ -29,13 +32,13 @@ export class ApiError extends Error {
   }
 }
 
-async function call<T>(path: string, init?: RequestInit): Promise<T> {
+async function call<T>(path: string, init?: RequestInit, timeoutMs = TIMEOUT_MS): Promise<T> {
   const token = await accessToken();
   if (!token) throw new ApiError("Sign in with Mochatrade to access live risk data.", 401);
   const res = await fetch(`${BASE}${path}`, {
     ...init,
     cache: "no-store",
-    signal: AbortSignal.timeout(TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
     headers: { "content-type": "application/json", authorization: `Bearer ${token}`, ...(init?.headers ?? {}) },
   });
   if (!res.ok) {
@@ -76,7 +79,7 @@ export function getTonight(accountId: string): Promise<ApiResult<TonightBriefing
 }
 
 export function getReplay(params: { symbol: string; date?: string }): Promise<ApiResult<ReplayResult>> {
-  return withAvailability(() => call<ReplayResult>("/replay", { method: "POST", body: JSON.stringify(params) }));
+  return withAvailability(() => call<ReplayResult>("/replay", { method: "POST", body: JSON.stringify(params) }, REPLAY_TIMEOUT_MS));
 }
 
 export function getLeverage(params: {
@@ -103,7 +106,7 @@ export function getLeverage(params: {
 /** Job 3 end to end: replay a whole session over the book and score the outcome. */
 export function runSessionReplay(params: { date?: string; step_minutes?: number } = {}): Promise<ApiResult<SessionReplay>> {
   return withAvailability(() =>
-    call<SessionReplay>("/replay/session", { method: "POST", body: JSON.stringify(params) }),
+    call<SessionReplay>("/replay/session", { method: "POST", body: JSON.stringify(params) }, REPLAY_TIMEOUT_MS),
   );
 }
 
