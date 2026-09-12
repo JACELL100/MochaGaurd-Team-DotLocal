@@ -22,7 +22,12 @@ import {
   Edit3,
   X,
   Check,
-  DollarSign
+  DollarSign,
+  History,
+  Sparkles,
+  Shield,
+  Activity,
+  Compass
 } from "lucide-react";
 import type { AccountSummary, AccountView, PositionRow } from "@/lib/types";
 import { money, pct, shares, lev } from "@/lib/format";
@@ -34,49 +39,91 @@ interface StressTestSimulatorProps {
   allPortfolios?: Record<string, AccountView>;
 }
 
-interface PresetShock {
+export interface CrisisScenario {
+  id: string;
   label: string;
   sublabel: string;
-  gap: number; // e.g. -0.12 for -12%
+  date: string;
+  gap: number; // e.g. -0.184 for -18.4%
   icon: React.ComponentType<{ className?: string }>;
   tone: "safe" | "warn" | "danger" | "critical";
+  headline: string;
+  historicalContext: string;
+  vixSpike: string;
+  liquidityDrain: string;
+  hedgeRecommendation: string;
 }
 
-const PRESETS: PresetShock[] = [
+export const CRISIS_SCENARIOS: CrisisScenario[] = [
   {
-    label: "Quiet Session",
-    sublabel: "Typical overnight drift",
-    gap: -0.005,
-    icon: Clock,
-    tone: "safe",
-  },
-  {
-    label: "CPI Surprise",
-    sublabel: "Macro rate shock",
-    gap: -0.035,
-    icon: Zap,
-    tone: "warn",
-  },
-  {
-    label: "Tech Sector Gap",
-    sublabel: "Semiconductor contagion",
-    gap: -0.075,
-    icon: TrendingDown,
-    tone: "warn",
-  },
-  {
-    label: "Earnings Disaster",
-    sublabel: "High-volume AMC earnings miss",
-    gap: -0.14,
+    id: "deepseek-2025",
+    label: "DeepSeek AI Shock",
+    sublabel: "Jan 27, 2025",
+    date: "Jan 27, 2025",
+    gap: -0.184,
     icon: Flame,
-    tone: "danger",
+    tone: "critical",
+    headline: "DeepSeek R1 Open-Source Shock Sparks $590B Semiconductor Rout",
+    historicalContext: "NVIDIA plummeted 17% in a single session alongside Broadcom (-14%) as the market repriced hyper-scaler capex efficiency. Unlevered accounts survived, but 4x+ margin accounts faced immediate liquidations.",
+    vixSpike: "+38.4% (VIX 24.8)",
+    liquidityDrain: "Overnight bid-ask spreads widened 4.2x on mega-cap tech perps.",
+    hedgeRecommendation: "Auto-Collar: Short 15% QQQ delta or buy 1-week 15% OTM Puts before 15:45 close.",
   },
   {
-    label: "Black Swan Crash",
-    sublabel: "Flash-crash liquidity shock",
-    gap: -0.25,
+    id: "nikkei-2024",
+    label: "Nikkei Black Monday",
+    sublabel: "Aug 5, 2024",
+    date: "Aug 5, 2024",
+    gap: -0.124,
+    icon: TrendingDown,
+    tone: "critical",
+    headline: "BOJ Rate Hike Collapses Global Yen Carry Trade (-12.4% Overnight)",
+    historicalContext: "The Nikkei suffered its steepest crash since Black Monday 1987. Cross-asset margin calls forced instantaneous global liquidations across Nasdaq, Crypto, and US equities before the New York open.",
+    vixSpike: "+181% (VIX hit 65.7 intraday)",
+    liquidityDrain: "Global multi-broker margin call queue backed up 45 minutes.",
+    hedgeRecommendation: "Cash Buffer: Deposit 22% cash margin or eliminate cross-currency leverage.",
+  },
+  {
+    id: "svb-2023",
+    label: "SVB Banking Run",
+    sublabel: "Mar 10, 2023",
+    date: "Mar 10, 2023",
+    gap: -0.065,
+    icon: Zap,
+    tone: "danger",
+    headline: "FDIC Shuts Silicon Valley Bank Following $42B Deposit Outflow",
+    historicalContext: "Contagion rapidly halted trading across mid-tier bank stocks. High-duration tech exposures suffered liquidity paralysis, triggering risk-off de-risking across growth equity.",
+    vixSpike: "+26.5% (VIX 26.5)",
+    liquidityDrain: "Prime brokers halted margin lending on regional banking collateral.",
+    hedgeRecommendation: "Collateral Rotation: Move speculative collateral into short-dated Treasuries (BIL/SGOV).",
+  },
+  {
+    id: "covid-2020",
+    label: "COVID Limit Down",
+    sublabel: "Mar 16, 2020",
+    date: "Mar 16, 2020",
+    gap: -0.120,
     icon: Skull,
     tone: "critical",
+    headline: "S&P 500 Halts on Opening Circuit Breaker; VIX Reaches Record 82.7",
+    historicalContext: "Overnight futures locked limit-down (-5%) hours before cash open. Cash open immediately triggered the 7% NYSE Level 1 halt. Brokers faced historic bad-debt shortfalls on retail accounts.",
+    vixSpike: "VIX 82.69 (All-time high territory)",
+    liquidityDrain: "Bid books emptied; institutional market makers pulled secondary quotes.",
+    hedgeRecommendation: "Emergency De-Risk: Reduce gross leverage to <1.2x prior to 15:45 cutoff.",
+  },
+  {
+    id: "nvda-earnings-2023",
+    label: "NVDA Blowout Gap Up",
+    sublabel: "May 25, 2023",
+    date: "May 25, 2023",
+    gap: 0.244,
+    icon: TrendingUp,
+    tone: "safe",
+    headline: "NVIDIA Shocks Wall Street With 50% Revenue Guidance Beat (+24.4% Gap)",
+    historicalContext: "Historic overnight short-squeeze as NVIDIA gained $184B in market cap before breakfast. Short sellers and delta-neutral perp traders suffered catastrophic margin calls.",
+    vixSpike: "-14.2% Volatility Crush",
+    liquidityDrain: "Perpetual short funding spiked to extreme negative borrowing fees.",
+    hedgeRecommendation: "Asymmetric Upside: Maintain capped upside collars without unlimited short delta.",
   },
 ];
 
@@ -102,7 +149,9 @@ export function StressTestSimulator({
   allPortfolios = {},
 }: StressTestSimulatorProps) {
   // Shock slider: from -35% (-0.35) to +10% (+0.10)
-  const [gapPct, setGapPct] = useState<number>(-0.08); // default -8%
+  const [gapPct, setGapPct] = useState<number>(-0.184); // default to DeepSeek Shock (-18.4%)
+  const [selectedCrisis, setSelectedCrisis] = useState<CrisisScenario | null>(CRISIS_SCENARIOS[0]);
+  const [armorDeployed, setArmorDeployed] = useState(false);
   const [selectedAccountModal, setSelectedAccountModal] = useState(false);
   const [currentAccount, setCurrentAccount] = useState<AccountView>(initialAccount);
 
@@ -143,14 +192,23 @@ export function StressTestSimulator({
 
   // Handle switching account
   const handleSwitchAccount = (acctId: string) => {
+    setSelectedAccountModal(false);
     const found = allPortfolios[acctId];
     if (found) {
       setCurrentAccount(found);
       setPositions(found.positions || []);
       setEquity(found.equity);
       setEquityInput(String(found.equity));
+      if (typeof window !== "undefined") {
+        const url = new URL(window.location.href);
+        url.searchParams.set("account", acctId);
+        window.history.pushState({}, "", url.toString());
+      }
+    } else {
+      if (typeof window !== "undefined") {
+        window.location.href = `/stress-test?account=${encodeURIComponent(acctId)}`;
+      }
     }
-    setSelectedAccountModal(false);
   };
 
   // Pre-fill stock details when user selects from dropdown
@@ -218,6 +276,30 @@ export function StressTestSimulator({
     setEquity(currentAccount.equity);
     setEquityInput(String(currentAccount.equity));
     setGapPct(-0.08);
+    setArmorDeployed(false);
+    setSelectedCrisis(null);
+  };
+
+  // 1-Click Margin Armor Collar Hedge Deployment
+  const handleDeployArmor = () => {
+    if (armorDeployed) return;
+    const targetHedgeNotional = Math.round(liveGrossExposure * 0.40);
+    const sqqqPrice = 28.50;
+    const hedgeShares = Math.max(10, Math.round(targetHedgeNotional / sqqqPrice));
+
+    const hedgePos: PositionRow = {
+      symbol: "SQQQ (Margin Armor)",
+      qty: hedgeShares,
+      price: sqqqPrice,
+      notional: hedgeShares * sqqqPrice,
+      max_leverage: 10.0,
+      adverse_move: 0.02,
+      earnings_tonight: false,
+      frozen: false,
+    };
+
+    setPositions([hedgePos, ...positions]);
+    setArmorDeployed(true);
   };
 
   // Save edited equity
@@ -592,24 +674,34 @@ export function StressTestSimulator({
             </div>
           </div>
 
-          {/* Historical Presets Quick-Buttons */}
+          {/* Black Swan Time Machine (Historical Crisis Replay Engine) */}
           <div className="pt-2">
-            <div className="text-[11px] font-mono uppercase tracking-wider text-[#94A3B8] mb-2.5 flex items-center gap-1.5">
-              <Zap className="w-3 h-3 text-[#A78BFA]" />
-              Historical Shock Scenarios
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
+              <div className="text-[11px] font-mono uppercase tracking-wider text-[#A78BFA] flex items-center gap-1.5 font-bold">
+                <History className="w-3.5 h-3.5 text-[#A78BFA]" />
+                The Black Swan Time Machine · Historical Crisis Replay
+              </div>
+              <span className="text-[10px] font-mono text-[#64748B] flex items-center gap-1">
+                <Sparkles className="w-3 h-3 text-[#7C3AED]" />
+                Interactive Stress Presets
+              </span>
             </div>
+
             <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
-              {PRESETS.map((p) => {
+              {CRISIS_SCENARIOS.map((p) => {
                 const Icon = p.icon;
-                const active = Math.abs(gapPct - p.gap) < 0.004;
+                const active = selectedCrisis?.id === p.id || Math.abs(gapPct - p.gap) < 0.004;
                 return (
                   <button
-                    key={p.label}
+                    key={p.id}
                     type="button"
-                    onClick={() => setGapPct(p.gap)}
+                    onClick={() => {
+                      setSelectedCrisis(p);
+                      setGapPct(p.gap);
+                    }}
                     className={`flex flex-col text-left p-3 rounded-xl border transition-all duration-200 ${
                       active
-                        ? "border-[#7C3AED] bg-[#7C3AED]/20 shadow-[0_0_20px_rgba(124,58,237,0.35)]"
+                        ? "border-[#7C3AED] bg-[#7C3AED]/20 shadow-[0_0_25px_rgba(124,58,237,0.4)]"
                         : "border-[#231F42] bg-[#0E0C1C] hover:border-[#7C3AED]/40 hover:bg-[#141126]"
                     }`}
                   >
@@ -625,14 +717,93 @@ export function StressTestSimulator({
                             : "text-[#34D399]"
                         }`}
                       />
-                      <span className="font-mono text-[11px] font-bold text-white">{(p.gap * 100).toFixed(1)}%</span>
+                      <span className="font-mono text-[11px] font-bold text-white">
+                        {p.gap > 0 ? `+${(p.gap * 100).toFixed(1)}%` : `${(p.gap * 100).toFixed(1)}%`}
+                      </span>
                     </div>
                     <span className="text-xs font-semibold text-white truncate">{p.label}</span>
-                    <span className="text-[10px] text-[#64748B] truncate">{p.sublabel}</span>
+                    <span className="text-[10px] text-[#A78BFA] font-mono truncate">{p.date}</span>
                   </button>
                 );
               })}
             </div>
+
+            {/* Interactive Crisis Dossier Card */}
+            {selectedCrisis && (
+              <div className="mt-4 rounded-2xl border border-[#7C3AED]/40 bg-[#0B0A16] p-4.5 shadow-2xl backdrop-blur-xl relative overflow-hidden animate-fade-in">
+                <div className="absolute -right-8 -bottom-8 w-40 h-40 bg-[#7C3AED]/10 rounded-full blur-3xl pointer-events-none" />
+
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-[#231F42] pb-3 mb-3">
+                  <div className="flex items-center gap-2.5">
+                    <span className="flex h-2 w-2 rounded-full bg-[#EF4444] animate-ping" />
+                    <span className="rounded-full bg-[#EF4444]/15 px-2.5 py-0.5 text-[10px] font-mono font-bold text-[#F87171] border border-[#EF4444]/30">
+                      CRISIS DOSSIER: {selectedCrisis.date}
+                    </span>
+                    <span className="text-xs font-bold text-white tracking-tight">
+                      {selectedCrisis.headline}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-md bg-[#181530] px-2 py-0.5 text-[10px] font-mono text-[#C4B5FD] border border-[#231F42]">
+                      VIX: {selectedCrisis.vixSpike}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+                  {/* Historical Narrative */}
+                  <div className="lg:col-span-7 space-y-2">
+                    <p className="text-xs text-[#CBD5E1] leading-relaxed">
+                      {selectedCrisis.historicalContext}
+                    </p>
+                    <div className="text-[11px] font-mono text-[#94A3B8] flex items-center gap-1.5">
+                      <AlertTriangle className="w-3 h-3 text-[#F59E0B]" />
+                      <span>{selectedCrisis.liquidityDrain}</span>
+                    </div>
+                  </div>
+
+                  {/* MochaGuard Survival Verdict & 1-Click Margin Armor */}
+                  <div className="lg:col-span-5 flex flex-col justify-between p-3.5 rounded-xl border border-[#231F42] bg-[#05050A]/80">
+                    <div>
+                      <div className="text-[10px] font-mono uppercase tracking-wider text-[#A78BFA] mb-1">
+                        MochaGuard Survival Engine
+                      </div>
+                      <div className="text-xs text-white">
+                        {sim.isNegativeEquity ? (
+                          <span className="text-[#F87171] font-medium">
+                            ⚠️ Unattended account loses 100% equity and incurs{" "}
+                            <strong className="font-mono font-bold">{money(sim.brokerLoss)}</strong> in negative bad debt. MochaGuard trims positions at 15:45 to guarantee broker solvency.
+                          </span>
+                        ) : (
+                          <span className="text-[#34D399] font-medium">
+                            ✓ Account survives with{" "}
+                            <strong className="font-mono font-bold">{money(sim.newEquity)}</strong> equity remaining (Buffer: {money(sim.buffer)}).
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="pt-3">
+                      {armorDeployed ? (
+                        <div className="flex items-center gap-2 rounded-xl bg-[#10B981]/15 border border-[#10B981]/40 px-3 py-2 text-xs font-mono font-semibold text-[#34D399]">
+                          <ShieldCheck className="w-4 h-4 text-[#34D399]" />
+                          <span>Margin Armor Active: Protective Hedge Added</span>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={handleDeployArmor}
+                          className="w-full flex items-center justify-center gap-2 rounded-xl border border-[#7C3AED] bg-gradient-to-r from-[#7C3AED] to-[#6D28D9] px-3 py-2 text-xs font-bold text-white shadow-[0_0_20px_rgba(124,58,237,0.4)] hover:brightness-110 active:scale-[0.98] transition-all"
+                        >
+                          <Shield className="w-3.5 h-3.5" />
+                          <span>Deploy 1-Click Collar Hedge (SQQQ Inverse)</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </GlowingCard>

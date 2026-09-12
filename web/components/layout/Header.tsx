@@ -3,14 +3,16 @@
 import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Shield } from "lucide-react";
+import { Shield, Bell } from "lucide-react";
 import { StatusBadge } from "../ui/StatusBadge";
 import type { Viewer } from "@/lib/supabase/server";
 import { UserMenu } from "./UserMenu";
+import { AlertSentinelModal } from "../AlertSentinelModal";
 
 export function Header({ viewer = null }: { viewer?: Viewer | null }) {
   const pathname = usePathname();
   const [scrolled, setScrolled] = useState(false);
+  const [isAlertModalOpen, setIsAlertModalOpen] = useState(false);
 
   useEffect(() => {
     let ticking = false;
@@ -33,7 +35,7 @@ export function Header({ viewer = null }: { viewer?: Viewer | null }) {
   // reachable by link and from decisions, but do not each claim a slot in the top bar.
   const navLinks = [
     { name: "Live Book", href: "/#console" },
-    { name: "Trading Desk", href: "/tonight" },
+    { name: "Tonight (2 AM)", href: "/tonight" },
     { name: "Stress Test", href: "/stress-test" },
     { name: "Why This Limit", href: "/simulate" },
     { name: "Score", href: "/score" },
@@ -87,7 +89,18 @@ export function Header({ viewer = null }: { viewer?: Viewer | null }) {
 
         {/* Right Status Indicator & Action CTA */}
         <div className="flex items-center gap-3">
-          <div className="hidden sm:flex">
+          {/* 2 AM Alert Sentinel Trigger */}
+          <button
+            type="button"
+            onClick={() => setIsAlertModalOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#7C3AED]/40 bg-[#121024] hover:bg-[#1C1838] text-xs font-semibold text-[#C4B5FD] transition-all shadow-[0_0_15px_rgba(124,58,237,0.2)]"
+            title="Configure 2 AM Sentinel Push Alerts (Telegram, Siren, Desktop)"
+          >
+            <Bell className="w-3.5 h-3.5 text-[#A78BFA] animate-pulse" />
+            <span className="hidden sm:inline">2 AM Alerts</span>
+          </button>
+
+          <div className="hidden lg:flex">
             <StatusBadge tone="safe" pulsing={true}>
               Sepolia Testnet Active
             </StatusBadge>
@@ -96,6 +109,11 @@ export function Header({ viewer = null }: { viewer?: Viewer | null }) {
           <UserMenu initialViewer={viewer} resolved />
         </div>
       </div>
+
+      <AlertSentinelModal
+        isOpen={isAlertModalOpen}
+        onClose={() => setIsAlertModalOpen(false)}
+      />
     </header>
   );
 }

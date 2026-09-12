@@ -179,3 +179,60 @@ body {
 .tabular {
   font-variant-numeric: tabular-nums;
 }
+
+@keyframes terminalShimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(200%);
+  }
+}
+
+@keyframes radarSweep {
+  0% {
+    opacity: 0.2;
+    transform: rotate(0deg);
+  }
+  50% {
+    opacity: 0.6;
+  }
+  100% {
+    opacity: 0.2;
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes scanlinePulse {
+  0%, 100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
+.terminal-skeleton-shimmer {
+  position: relative;
+  overflow: hidden;
+}
+
+.terminal-skeleton-shimmer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  transform: translateX(-100%);
+  background-image: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0,
+    rgba(167, 139, 250, 0.07) 35%,
+    rgba(196, 181, 253, 0.12) 50%,
+    rgba(167, 139, 250, 0.07) 65%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  animation: terminalShimmer 1.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+

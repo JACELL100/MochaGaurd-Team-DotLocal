@@ -72,8 +72,9 @@ def test_frozen_symbol_attributes_everything_to_the_freeze():
     assert attr['steps'][0]['lost'] == attr['cap']
 
 
-def test_market_closure_is_reported_separately_from_volatility():
+def test_market_closure_is_reported_separately_from_volatility(monkeypatch):
     '''The 17.5-hour blind spot is the product thesis; it must not be folded into "volatility".'''
+    monkeypatch.setattr(settings, 'safety', 0.30)
     book = demo_book(40)
     night = datetime(DEMO_DAY.year, DEMO_DAY.month, DEMO_DAY.day, 20, 0, tzinfo=ET)
     result = book.symbol_leverage('AAPL', night, 50_000)

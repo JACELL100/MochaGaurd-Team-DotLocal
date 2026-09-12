@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = True
     run_migrations_on_start: bool = False
     engine_evaluate_seconds: int = 60
+    # --- notifications
+    telegram_bot_token: str = ''
+    telegram_chat_id: str = ''
     cors_origins: str = 'http://localhost:3000'
 
     @field_validator('universe', mode='before')

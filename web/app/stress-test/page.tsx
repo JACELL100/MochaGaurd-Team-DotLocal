@@ -179,7 +179,17 @@ export default async function StressTestPage({
     liveBriefing?.account ??
     (selectedId ? DEMO_PORTFOLIOS[selectedId] : undefined) ??
     DEMO_PORTFOLIOS["demo-trader-01"];
-  const accountList: AccountSummary[] = liveAccounts.length > 0 ? liveAccounts : DEMO_ACCOUNTS;
+  const accountList: AccountSummary[] = [
+    ...liveAccounts,
+    ...DEMO_ACCOUNTS.filter((d) => !liveAccounts.some((la) => la.id === d.id)),
+  ];
+
+  const allPortfoliosMap: Record<string, AccountView> = {
+    ...DEMO_PORTFOLIOS,
+  };
+  if (liveBriefing?.account) {
+    allPortfoliosMap[liveBriefing.account.account_id] = liveBriefing.account;
+  }
 
   return (
     <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full">
@@ -201,7 +211,7 @@ export default async function StressTestPage({
       <StressTestSimulator
         accounts={accountList}
         selectedAccount={activeAccount}
-        allPortfolios={DEMO_PORTFOLIOS}
+        allPortfolios={allPortfoliosMap}
       />
     </div>
   );
