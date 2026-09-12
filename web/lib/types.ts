@@ -508,3 +508,24 @@ export interface PositionRisk {
   summary: string;
   factors: RiskFactor[];
 }
+
+export interface AnchorBatch {
+  id: number;
+  batch_date: string;
+  run_id: string;
+  merkle_root: string;
+  decision_count: number;
+  tx_hash: string | null;
+  contract_address: string | null;
+  anchored_at: string | null;
+  error: string | null;
+  created_at: string;
+  etherscan_url?: string | null;
+}
+
+export interface AnchorStatus {
+  batches: AnchorBatch[];
+  chain_configured: boolean;
+  contract_address: string | null;
+  contract_url: string | null;
+}

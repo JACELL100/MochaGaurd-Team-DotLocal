@@ -17,10 +17,30 @@ class AnchorUnavailable(RuntimeError):
     pass
 
 
+# Public Sepolia RPC fallbacks tried in order after the configured URL.
+# rpc.sepolia.org has a history of outages; publicnode is the most reliable free option.
+_SEPOLIA_FALLBACKS = [
+    'https://ethereum-sepolia-rpc.publicnode.com',
+    'https://rpc2.sepolia.org',
+    'https://sepolia.gateway.tenderly.co',
+]
+
+
 def _web3() -> Web3:
+    """Return a connected Web3 client for Sepolia, trying fallback RPCs on failure."""
     if not settings.chain_configured:
         raise AnchorUnavailable('Set CONTRACT_ADDRESS, ANCHOR_PRIVATE_KEY and SEPOLIA_RPC_URL first')
-    return Web3(Web3.HTTPProvider(settings.sepolia_rpc_url, request_kwargs={'timeout': 30}))
+    # Deduplicate while preserving order (configured URL goes first).
+    urls = list(dict.fromkeys([settings.sepolia_rpc_url] + _SEPOLIA_FALLBACKS))
+    last_exc: Exception | None = None
+    for url in urls:
+        try:
+            w3 = Web3(Web3.HTTPProvider(url, request_kwargs={'timeout': 10}))
+            if w3.eth.chain_id == 11155111:
+                return w3
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+    raise AnchorUnavailable(f'All Sepolia RPC endpoints unreachable. Last error: {last_exc}')
 
 
 def _contract(w3: Web3):
@@ -33,13 +53,10 @@ async def anchor_day(batch_date: date, run_id: str = '') -> dict:
         raise ValueError(f'No decisions exist for {batch_date.isoformat()}')
     leaves = [leaf_hash(decision) for decision in decisions]
     root, paths = build_tree(leaves)
-    w3 = _web3()
-    chain_id = await asyncio.to_thread(lambda: w3.eth.chain_id)
-    if chain_id != 11155111:
-        raise AnchorUnavailable(f'RPC chain is {chain_id}; Sepolia (11155111) is required')
+    w3 = await asyncio.to_thread(_web3)  # _web3 validates chain_id internally
     batch_id = await db.store_batch(batch_date, run_id, to_hex(root), [int(d['id']) for d in decisions],
                                     hexes(leaves), [hexes(path) for path in paths],
-                                    settings.contract_address, chain_id)
+                                    settings.contract_address, 11155111)
     existing = await db.get_batch(batch_date, run_id)
     if existing and existing.get('tx_hash'):
         return existing
@@ -86,7 +103,12 @@ async def verify_decision(decision_id: int) -> dict:
         try:
             def call() -> bool:
                 w3 = _web3()
-                return bool(_contract(w3).functions.verify(proof['merkle_root'], proof['leaf_hash'], path).call())
+                def _b(h: str) -> bytes:
+                    return bytes.fromhex(h[2:] if h.startswith('0x') else h)
+                root_b = _b(proof['merkle_root'])
+                leaf_b = _b(proof['leaf_hash'])
+                path_b = [_b(p) for p in path]
+                return bool(_contract(w3).functions.verify(root_b, leaf_b, path_b).call())
             valid = await asyncio.to_thread(call)
         except Exception as exc:
             error = f'On-chain verification unavailable: {exc}'

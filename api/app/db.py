@@ -523,6 +523,12 @@ async def unanchored_batches() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def recent_anchor_batches(limit: int = 10) -> list[dict]:
+    rows = await pool().fetch(
+        'select * from anchor_batches order by created_at desc limit $1', limit)
+    return [dict(r) for r in rows]
+
+
 # ============================================================================ replay
 
 async def save_replay(run_id: str, session_date: date, summary: dict, events: list, series: dict) -> None:

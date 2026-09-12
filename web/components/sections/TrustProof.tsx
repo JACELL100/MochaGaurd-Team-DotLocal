@@ -29,7 +29,14 @@ export function TrustProof() {
             <Lock className="w-3.5 h-3.5 text-[#A78BFA]" />
             MochaAnchor.sol
           </div>
-          <div className="text-[11px] text-[#64748B] mt-1">Verified on Sepolia testnet</div>
+          <a
+            href="https://sepolia.etherscan.io/address/0x59cfFc2096E838EB240A93948B5333A6a211224f"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[11px] font-mono text-[#A78BFA] hover:text-white mt-1 flex items-center justify-center gap-1 transition-colors"
+          >
+            0x59cf…224f <ExternalLink className="w-2.5 h-2.5" />
+          </a>
         </div>
 
         <div className="p-4 rounded-xl glass-panel border border-[#231F42]">

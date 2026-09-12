@@ -12,6 +12,7 @@ import uuid
 from contextlib import asynccontextmanager, suppress
 from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
@@ -159,6 +160,8 @@ class LiveService:
             if self.poller:
                 self.tasks.append(asyncio.create_task(self.poller.run(), name='quote-poller'))
             self.tasks.append(asyncio.create_task(self._evaluation_loop(), name='risk-evaluator'))
+            if settings.chain_configured:
+                self.tasks.append(asyncio.create_task(self._anchor_loop(), name='anchor-scheduler'))
 
     async def _backfill_intraday(self) -> None:
         if not self.yf and not (self.av and settings.alpha_vantage_premium):
@@ -219,6 +222,34 @@ class LiveService:
             except Exception:  # noqa: BLE001
                 log.exception('scheduled risk evaluation failed')
             await asyncio.sleep(max(15, settings.engine_evaluate_seconds))
+
+    async def _anchor_loop(self) -> None:
+        '''Sleep until anchor_hour_et (ET) each day, then commit the day's live decisions to Sepolia.'''
+        tz_et = ZoneInfo('America/New_York')
+        while True:
+            try:
+                now = datetime.now(tz=timezone.utc).astimezone(tz_et)
+                target = now.replace(hour=settings.anchor_hour_et, minute=0, second=0, microsecond=0)
+                if now >= target:
+                    target = target + timedelta(days=1)
+                wait_s = (target - now).total_seconds()
+                log.info('anchor-scheduler: sleeping %.0fs until %s ET', wait_s, target.strftime('%Y-%m-%d %H:%M'))
+                await asyncio.sleep(wait_s)
+                batch_date = target.date()
+                decisions = await db.decisions_for_day(batch_date, '')
+                if decisions:
+                    await publisher.anchor_day(batch_date, '')
+                    log.info('anchor-scheduler: anchored %d live decisions for %s', len(decisions), batch_date)
+                else:
+                    log.info('anchor-scheduler: no live decisions for %s, skipping', batch_date)
+            except publisher.AnchorUnavailable as exc:
+                log.warning('anchor-scheduler: chain unavailable: %s', exc)
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                return
+            except Exception:  # noqa: BLE001
+                log.exception('anchor-scheduler failed')
+                await asyncio.sleep(300)
 
     async def evaluate(self, ts: datetime | None = None, *, record: bool = False):
         book = self.require_book()
@@ -701,6 +732,13 @@ async def replay_session(input: SessionReplayInput, request: Request,
                 decision['id'] = decision_id
             await db.insert_liquidations(result.fills, run_id=run_id)
             await db.save_replay(run_id, session_date, summary, result.events, result.series)
+            # Anchor the replay's decisions to Sepolia as a background task so the response
+            # is not blocked by a chain round-trip.  Failures are logged, never surfaced here.
+            if settings.chain_configured and ids:
+                asyncio.create_task(
+                    _anchor_replay_safe(session_date, run_id),
+                    name=f'anchor-replay-{run_id}',
+                )
         except Exception:  # noqa: BLE001
             log.exception('replay persistence failed for %s', run_id)
 
@@ -724,6 +762,46 @@ async def replay_run(run_id: str, request: Request, _: Annotated[Principal, Depe
         raise HTTPException(status_code=404, detail='No replay run with that id')
     return {'run_id': row['run_id'], 'session_date': row['session_date'].isoformat(),
             **(row['summary'] or {}), 'events': row['events'], 'series': row['series']}
+
+
+async def _anchor_replay_safe(batch_date: date, run_id: str) -> None:
+    '''Background helper: anchor a persisted replay without blocking the HTTP response.'''
+    try:
+        await publisher.anchor_day(batch_date, run_id)
+        log.info('replay anchor complete: %s / %s', batch_date, run_id)
+    except publisher.AnchorUnavailable as exc:
+        log.warning('replay anchor unavailable for %s/%s: %s', batch_date, run_id, exc)
+    except Exception:  # noqa: BLE001
+        log.exception('replay anchor failed for %s/%s', batch_date, run_id)
+
+
+@app.get('/anchor/status')
+async def anchor_status(_: Annotated[Principal, Depends(get_principal)]):
+    '''Recent anchor batches — shows judges the last few on-chain commitments at a glance.'''
+    batches = await db.recent_anchor_batches(limit=10)
+    out = []
+    for b in batches:
+        tx = b.get('tx_hash')
+        out.append({
+            'id': b['id'],
+            'batch_date': b['batch_date'].isoformat() if b.get('batch_date') else None,
+            'run_id': b.get('run_id', ''),
+            'merkle_root': b.get('merkle_root'),
+            'decision_count': b.get('decision_count'),
+            'tx_hash': tx,
+            'contract_address': b.get('contract_address'),
+            'anchored_at': b['anchored_at'].isoformat() if b.get('anchored_at') else None,
+            'error': b.get('error'),
+            'created_at': b['created_at'].isoformat() if b.get('created_at') else None,
+            'etherscan_url': f'https://sepolia.etherscan.io/tx/{tx}' if tx else None,
+        })
+    contract = settings.contract_address if settings.chain_configured else None
+    return {
+        'batches': out,
+        'chain_configured': settings.chain_configured,
+        'contract_address': contract,
+        'contract_url': f'https://sepolia.etherscan.io/address/{contract}' if contract else None,
+    }
 
 
 @app.post('/anchor/{batch_date}')

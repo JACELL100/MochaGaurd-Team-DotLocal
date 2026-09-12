@@ -6,6 +6,7 @@ import "server-only";
 import { accessToken } from "./supabase/server";
 import type {
   AccountSummary,
+  AnchorStatus,
   ApiResult,
   BookResponse,
   DeskResponse,
@@ -120,4 +121,8 @@ export function getVerify(decisionId: number): Promise<ApiResult<VerifyResult>> 
 export function getMarket(kind: string, params: Record<string, string>): Promise<ApiResult<{ source: string; retrieved_at: string; data: unknown }>> {
   const query = new URLSearchParams(params).toString();
   return withAvailability(() => call(`/market/${encodeURIComponent(kind)}?${query}`));
+}
+
+export function getAnchorStatus(): Promise<ApiResult<AnchorStatus>> {
+  return withAvailability(() => call<AnchorStatus>("/anchor/status"));
 }
