@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -32,6 +32,7 @@ from .data.alpha_vantage import AlphaVantage, AVError, QuotaExceeded
 from .data.loader import load_book
 from .data.poller import QuotePoller
 from .data.precompute import compute_all
+from .data import seed as seed_module
 from .data.yfinance import YFinance, YFinanceError
 from .engine import calendar as cal
 from .engine import funding as funding_engine
@@ -908,6 +909,90 @@ async def sync_account(input: AccountSyncInput, request: Request, x_internal_key
     await db.replace_positions(str(account['id']), [position.model_dump() for position in input.positions])
     await service_of(request).reload_book()
     return {'account_id': str(account['id']), 'positions_synced': len(input.positions)}
+
+
+# ── one-shot seed endpoints (run once after a fresh DB deployment) ─────────────
+
+class SeedMarketInput(BaseModel):
+    symbols: list[str] | None = None   # defaults to the UNIVERSE from settings
+    include_earnings: bool = True
+
+
+class SeedBookInput(BaseModel):
+    n_accounts: int = 400
+    clear: bool = False
+
+
+_seed_market_status: dict = {'state': 'idle', 'result': None, 'error': None}
+
+
+def _require_internal(x_internal_key: Annotated[str | None, Header()] = None) -> None:
+    if not settings.internal_api_key or x_internal_key != settings.internal_api_key:
+        raise HTTPException(status_code=401, detail='Valid X-Internal-Key header is required')
+
+
+@app.post('/internal/seed/market')
+async def internal_seed_market(
+    input: SeedMarketInput,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    x_internal_key: Annotated[str | None, Header()] = None,
+):
+    """Download market history + compute risk stats for the symbol universe.
+
+    Runs as a background task so the HTTP call returns immediately.
+    Poll GET /internal/seed/market/status to track progress.
+    """
+    _require_internal(x_internal_key)
+    if _seed_market_status['state'] == 'running':
+        return {'detail': 'Seed already in progress', 'status': _seed_market_status}
+
+    symbols = [s.upper() for s in input.symbols] if input.symbols else settings.symbols
+
+    async def _run() -> None:
+        _seed_market_status['state'] = 'running'
+        _seed_market_status['error'] = None
+        _seed_market_status['result'] = None
+        try:
+            result = await seed_module.seed_market(symbols, input.include_earnings)
+            _seed_market_status['result'] = result
+            _seed_market_status['state'] = 'done'
+            log.info('seed_market completed: %s', result)
+            await service_of(request).reload_book()
+        except Exception as exc:  # noqa: BLE001
+            _seed_market_status['state'] = 'error'
+            _seed_market_status['error'] = str(exc)
+            log.exception('seed_market failed')
+
+    background_tasks.add_task(_run)
+    return {'detail': 'Seeding started in background', 'symbols': symbols}
+
+
+@app.get('/internal/seed/market/status')
+async def internal_seed_market_status(x_internal_key: Annotated[str | None, Header()] = None):
+    """Return the status of the most recent seed_market run."""
+    _require_internal(x_internal_key)
+    return _seed_market_status
+
+
+@app.post('/internal/seed/book')
+async def internal_seed_book(
+    input: SeedBookInput,
+    request: Request,
+    x_internal_key: Annotated[str | None, Header()] = None,
+):
+    """Seed *n_accounts* sample accounts sized against real market data.
+
+    Requires seed_market to have run first (symbol_risk must be populated).
+    Pass ``clear=true`` to remove all sample accounts instead.
+    """
+    _require_internal(x_internal_key)
+    try:
+        result = await seed_module.seed_book(n_accounts=input.n_accounts, clear=input.clear)
+        await service_of(request).reload_book()
+        return result
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 class TelegramTestInput(BaseModel):
